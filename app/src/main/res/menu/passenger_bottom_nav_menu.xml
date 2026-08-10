@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/tab_home"
+        android:icon="@drawable/ic_tab_home"
+        android:title="@string/home_tab" />
+    <item
+        android:id="@+id/tab_map"
+        android:icon="@drawable/ic_tab_map"
+        android:title="@string/map_tab" />
+    <item
+        android:id="@+id/tab_routes"
+        android:icon="@drawable/ic_tab_route"
+        android:title="@string/routes_tab" />
+    <item
+        android:id="@+id/tab_my_trip"
+        android:icon="@drawable/ic_tab_trip"
+        android:title="@string/my_trip_tab" />
+    <item
+        android:id="@+id/tab_profile"
+        android:icon="@drawable/ic_tab_profile"
+        android:title="@string/profile_tab" />
+</menu>

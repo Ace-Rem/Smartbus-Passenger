@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="smartbus_primary">#0B63CE</color>
+    <color name="smartbus_primary_container">#D8E8FF</color>
+    <color name="smartbus_primary_container_soft">#EAF3FF</color>
+    <color name="smartbus_primary_dark">#084A99</color>
+    <color name="smartbus_background">#F3F6FA</color>
+    <color name="smartbus_surface">#FFFFFFFF</color>
+    <color name="smartbus_outline">#D7DEE9</color>
+    <color name="smartbus_text_primary">#18212F</color>
+    <color name="smartbus_text_secondary">#607086</color>
+    <color name="smartbus_success">#19A65A</color>
+    <color name="smartbus_warning">#E8952B</color>
+    <color name="smartbus_error">#C62828</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

@@ -1,0 +1,16 @@
+<resources>
+    <dimen name="spacing_xs">8dp</dimen>
+    <dimen name="spacing_sm">12dp</dimen>
+    <dimen name="spacing_md">16dp</dimen>
+    <dimen name="spacing_lg">20dp</dimen>
+    <dimen name="spacing_xl">24dp</dimen>
+    <dimen name="radius_md">18dp</dimen>
+    <dimen name="radius_lg">22dp</dimen>
+    <dimen name="radius_xl">26dp</dimen>
+    <dimen name="radius_xxl">32dp</dimen>
+    <dimen name="elevation_card">4dp</dimen>
+    <dimen name="elevation_card_raised">8dp</dimen>
+    <dimen name="button_height_large">66dp</dimen>
+    <dimen name="icon_xl">64dp</dimen>
+    <dimen name="passenger_bottom_nav_height">84dp</dimen>
+</resources>

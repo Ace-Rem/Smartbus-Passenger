@@ -1,0 +1,80 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { stream -> localProperties.load(stream) }
+}
+
+def resolveApiBaseUrl = { String fallback ->
+    def fromLocal = localProperties.getProperty("API_BASE_URL")
+    if (fromLocal != null && !fromLocal.trim().isEmpty()) {
+        return fromLocal.trim()
+    }
+    def fromProject = project.findProperty("API_BASE_URL")
+    if (fromProject != null && !fromProject.toString().trim().isEmpty()) {
+        return fromProject.toString().trim()
+    }
+    return fallback
+}
+
+android {
+    namespace 'com.smartbus.passenger'
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.smartbus.passenger"
+        minSdk 28
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders = [
+                usesCleartextTraffic: "false"
+        ]
+    }
+
+    buildTypes {
+        debug {
+            def apiBaseUrl = resolveApiBaseUrl("https://smartbus-w5qy.onrender.com/api/")
+            buildConfigField "String", "BASE_URL", "\"${apiBaseUrl}\""
+            manifestPlaceholders.usesCleartextTraffic = apiBaseUrl.startsWith("http://") ? "true" : "false"
+        }
+        release {
+            optimization {
+                enable false
+            }
+            def apiBaseUrl = resolveApiBaseUrl("https://smartbus-w5qy.onrender.com/api/")
+            buildConfigField "String", "BASE_URL", "\"${apiBaseUrl}\""
+            manifestPlaceholders.usesCleartextTraffic = "false"
+        }
+    }
+    buildFeatures {
+        buildConfig true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation libs.appcompat
+    implementation libs.material
+    implementation libs.retrofit
+    implementation libs.retrofit.gson
+    implementation libs.okhttp.logging
+    implementation libs.osmdroid
+    implementation libs.room.runtime
+    annotationProcessor libs.room.compiler
+    testImplementation libs.junit
+    androidTestImplementation libs.espresso.core
+    androidTestImplementation libs.ext.junit
+}
