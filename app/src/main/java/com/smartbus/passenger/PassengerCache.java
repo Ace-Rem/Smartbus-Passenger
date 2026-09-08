@@ -43,6 +43,30 @@ class CachedTripEntity {
     double currentLongitude;
 }
 
+@Entity(tableName = "selected_trip", primaryKeys = {"id"})
+class CachedSelectedTripEntity {
+    int id;
+    Long tripId;
+    Long routeId;
+    String tripStatus;
+    Long currentStopId;
+    double currentLatitude;
+    double currentLongitude;
+    Long boardingStopId;
+    String boardingStopName;
+    double boardingLatitude;
+    double boardingLongitude;
+    Integer boardingStopOrder;
+    Long destinationStopId;
+    String destinationStopName;
+    double destinationLatitude;
+    double destinationLongitude;
+    Integer destinationStopOrder;
+    Long boardingRequestId;
+    String boardingRequestStatus;
+    String bluetoothIdentifier;
+}
+
 @Dao
 interface PassengerRouteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -80,11 +104,34 @@ interface PassengerTripDao {
 
     @Query("SELECT * FROM trips WHERE routeId = :routeId AND status = :status ORDER BY startedAt DESC")
     List<CachedTripEntity> tripsByRouteAndStatus(long routeId, String status);
+
+    @Query("SELECT * FROM trips WHERE routeId = :routeId ORDER BY startedAt DESC")
+    List<CachedTripEntity> tripsByRoute(long routeId);
+
+    @Query("SELECT * FROM trips ORDER BY startedAt DESC")
+    List<CachedTripEntity> allTrips();
+}
+
+@Dao
+interface PassengerSelectionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    void upsert(CachedSelectedTripEntity selection);
+
+    @Query("SELECT * FROM selected_trip WHERE id = 1 LIMIT 1")
+    CachedSelectedTripEntity selected();
+
+    @Query("DELETE FROM selected_trip")
+    void clear();
 }
 
 @Database(
-        entities = {CachedRouteEntity.class, CachedStopEntity.class, CachedTripEntity.class},
-        version = 1,
+        entities = {
+                CachedRouteEntity.class,
+                CachedStopEntity.class,
+                CachedTripEntity.class,
+                CachedSelectedTripEntity.class
+        },
+        version = 2,
         exportSchema = false
 )
 abstract class PassengerDatabase extends RoomDatabase {
@@ -95,6 +142,8 @@ abstract class PassengerDatabase extends RoomDatabase {
     abstract PassengerStopDao stopDao();
 
     abstract PassengerTripDao tripDao();
+
+    abstract PassengerSelectionDao selectionDao();
 
     static PassengerDatabase getInstance(Context context) {
         if (instance == null) {

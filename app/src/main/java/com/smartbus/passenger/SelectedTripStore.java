@@ -32,14 +32,22 @@ final class SelectedTripStore {
     PassengerSelectionState state() {
         PassengerSelectionState state = new PassengerSelectionState();
         state.selectTrip(trip());
+        if (selection.routeId != null) {
+            RouteModel route = new RouteModel();
+            route.id = selection.routeId;
+            state.setRoute(route);
+        }
         state.setBoardingStop(boardingStop());
         state.setDestinationStop(destinationStop());
         state.syncBoardingRequest(boardingRequest());
+        if (state.boardingRequest() == null && selection.boardingRequestStatus != null) {
+            state.restoreLocalSelection(selection.bluetoothIdentifier, selection.boardingRequestStatus);
+        }
         return state;
     }
 
     void persist(PassengerSelectionState state) {
-        if (state == null || !state.hasTrip()) {
+        if (state == null || (!state.hasTrip() && state.selectedRouteId() == null)) {
             clear();
             return;
         }
@@ -52,8 +60,8 @@ final class SelectedTripStore {
         selection.currentLongitude = trip == null ? null : trip.currentLongitude;
         BoardingRequestModel request = state.boardingRequest();
         selection.boardingRequestId = request == null ? null : request.id;
-        selection.boardingRequestStatus = request == null ? null : request.status;
-        selection.bluetoothIdentifier = request == null ? null : request.bluetoothIdentifier;
+        selection.boardingRequestStatus = request == null ? state.checkInStatus() : request.status;
+        selection.bluetoothIdentifier = state.bluetoothIdentifier();
         selection.boardingStop = PassengerSelectionState.copyStop(state.boardingStop());
         selection.destinationStop = PassengerSelectionState.copyStop(state.destinationStop());
         persist();
@@ -67,18 +75,22 @@ final class SelectedTripStore {
         if (trip == null || trip.id == null) {
             return;
         }
+        boolean changedTrip = selection.tripId == null || !selection.tripId.equals(trip.id);
         selection.tripId = trip.id;
         selection.routeId = trip.routeId;
         selection.tripStatus = trip.status;
         selection.currentStopId = trip.currentStopId;
         selection.currentLatitude = trip.currentLatitude;
         selection.currentLongitude = trip.currentLongitude;
-        if (boardingStop != null && boardingStop.id != null) {
-            selection.boardingStop = copyStop(boardingStop);
+        if (changedTrip) {
+            selection.boardingRequestId = null;
+            selection.boardingRequestStatus = null;
+            selection.bluetoothIdentifier = null;
         }
-        if (destinationStop != null && destinationStop.id != null) {
-            selection.destinationStop = copyStop(destinationStop);
-        }
+        selection.boardingStop = boardingStop == null || boardingStop.id == null
+                ? null : copyStop(boardingStop);
+        selection.destinationStop = destinationStop == null || destinationStop.id == null
+                ? null : copyStop(destinationStop);
         persist();
     }
 

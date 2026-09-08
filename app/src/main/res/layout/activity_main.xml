@@ -611,14 +611,14 @@
                         android:layout_width="match_parent"
                         android:layout_height="48dp"
                         android:layout_marginTop="8dp"
-                        android:backgroundTint="@color/smartbus_primary" />
+                        android:background="@null" />
 
                     <Spinner
                         android:id="@+id/destinationStopSpinner"
                         android:layout_width="match_parent"
                         android:layout_height="48dp"
                         android:layout_marginTop="8dp"
-                        android:backgroundTint="@color/smartbus_primary" />
+                        android:background="@null" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/findTripsButton"
@@ -649,6 +649,15 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:paddingBottom="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="12dp"
+                        android:text="@string/my_trip_tab"
+                        android:textColor="@color/smartbus_text_primary"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
 
                     <com.google.android.material.card.MaterialCardView
                         android:layout_width="match_parent"
@@ -744,7 +753,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="48dp"
                                 android:layout_marginTop="4dp"
-                                android:backgroundTint="@color/smartbus_primary"
+                                android:background="@null"
                                 android:enabled="false" />
 
                             <com.google.android.material.button.MaterialButton
@@ -773,7 +782,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="48dp"
                                 android:layout_marginTop="4dp"
-                                android:backgroundTint="@color/smartbus_primary"
+                                android:background="@null"
                                 android:enabled="false" />
 
                             <com.google.android.material.button.MaterialButton
@@ -793,7 +802,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="10dp"
-                                android:enabled="false"
+                                android:enabled="true"
                                 android:text="@string/nearby_confirm_checkin"
                                 android:textColor="@color/white"
                                 app:backgroundTint="@color/smartbus_success" />

@@ -30,6 +30,7 @@
     <string name="destination_stop_label">Bến xuống</string>
     <string name="boarding_stop_not_selected">Chưa chọn bến</string>
     <string name="nearby_confirm_checkin">Xác nhận check-in</string>
+    <string name="confirm_trip_stops_action">Xác nhận bến đi/xuống</string>
     <string name="requests_title">Yêu cầu lên xe</string>
     <string name="map_title">Bản đồ tuyến</string>
     <string name="map_empty">Chọn tuyến để hiển thị bến và lộ trình trên bản đồ.</string>

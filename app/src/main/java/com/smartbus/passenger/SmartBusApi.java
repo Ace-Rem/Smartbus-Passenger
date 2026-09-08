@@ -59,6 +59,11 @@ public interface SmartBusApi {
     @POST("boarding-requests")
     Call<ApiResponse<BoardingRequestModel>> createBoardingRequest(@Body CreateBoardingRequest request);
 
+    @POST("fast-boarding-signals")
+    Call<ApiResponse<FastBoardingSignalModel>> publishFastBoardingSignal(
+            @Body FastBoardingSignalRequest request
+    );
+
     @GET("boarding-requests/mine")
     Call<ApiResponse<List<BoardingRequestModel>>> myRequests();
 
@@ -165,6 +170,22 @@ class CreateBoardingRequest {
     }
 }
 
+class FastBoardingSignalRequest {
+    final Long routeId;
+    final Long destinationStopId;
+
+    FastBoardingSignalRequest(Long routeId, Long destinationStopId) {
+        this.routeId = routeId;
+        this.destinationStopId = destinationStopId;
+    }
+}
+
+class FastBoardingSignalModel {
+    Long id;
+    Long routeId;
+    Long destinationStopId;
+}
+
 class PassengerLoginResponse {
     String accessToken;
     String tokenType;
@@ -226,6 +247,7 @@ class BoardingRequestModel {
     Long id;
     PassengerModel passenger;
     TripModel trip;
+    Long routeId;
     StopModel boardingStop;
     StopModel destinationStop;
     Long passengerRecordId;

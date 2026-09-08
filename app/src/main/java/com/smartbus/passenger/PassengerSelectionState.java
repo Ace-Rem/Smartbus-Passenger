@@ -12,6 +12,8 @@ final class PassengerSelectionState {
     private StopModel boardingStop;
     private StopModel destinationStop;
     private BoardingRequestModel boardingRequest;
+    private String bluetoothIdentifier;
+    private String checkInStatus;
 
     Long selectedTripId() {
         return selectedTrip == null ? null : selectedTrip.id;
@@ -56,6 +58,20 @@ final class PassengerSelectionState {
         return boardingRequest;
     }
 
+    String bluetoothIdentifier() {
+        if (boardingRequest != null && boardingRequest.bluetoothIdentifier != null) {
+            return boardingRequest.bluetoothIdentifier;
+        }
+        return bluetoothIdentifier;
+    }
+
+    String checkInStatus() {
+        if (boardingRequest != null && boardingRequest.status != null) {
+            return boardingRequest.status;
+        }
+        return checkInStatus;
+    }
+
     Long boardingRequestId() {
         return boardingRequest == null ? null : boardingRequest.id;
     }
@@ -72,6 +88,27 @@ final class PassengerSelectionState {
         return selectedTripId() != null && boardingStopId() != null && destinationStopId() != null;
     }
 
+    void markLocalCheckIn(String identifier) {
+        bluetoothIdentifier = identifier;
+        checkInStatus = "PENDING";
+    }
+
+    void restoreLocalSelection(String identifier, String status) {
+        bluetoothIdentifier = identifier;
+        checkInStatus = status == null || status.isBlank() ? "PENDING" : status;
+    }
+
+    void confirmLocalSelection(String identifier) {
+        if (identifier != null && !identifier.isBlank()) {
+            bluetoothIdentifier = identifier;
+        }
+        checkInStatus = "SELECTED";
+    }
+
+    boolean isLocalSelectionConfirmed() {
+        return "SELECTED".equals(checkInStatus);
+    }
+
     void selectTrip(TripModel trip) {
         if (trip == null || trip.id == null) {
             return;
@@ -82,6 +119,8 @@ final class PassengerSelectionState {
             boardingRequest = null;
             boardingStop = null;
             destinationStop = null;
+            bluetoothIdentifier = null;
+            checkInStatus = null;
         }
         if (selectedRoute != null && trip.routeId != null && !trip.routeId.equals(selectedRoute.id)) {
             selectedRoute = null;
@@ -113,19 +152,32 @@ final class PassengerSelectionState {
 
     void setBoardingStop(StopModel stop) {
         if (stop == null || stop.id == null) {
+            if (boardingStop == null && destinationStop == null) {
+                return;
+            }
             boardingStop = null;
             destinationStop = null;
+            checkInStatus = null;
             return;
         }
+        boolean changed = boardingStop == null || !stop.id.equals(boardingStop.id);
         boardingStop = copyStop(stop);
+        if (changed) {
+            checkInStatus = null;
+        }
         if (!destinationAfterBoarding(destinationStop)) {
             destinationStop = null;
+            checkInStatus = null;
         }
     }
 
     void setDestinationStop(StopModel stop) {
         if (stop == null || stop.id == null) {
+            if (destinationStop == null) {
+                return;
+            }
             destinationStop = null;
+            checkInStatus = null;
             return;
         }
         if (boardingStop != null
@@ -133,9 +185,14 @@ final class PassengerSelectionState {
                 && stop.stopOrder != null
                 && stop.stopOrder <= boardingStop.stopOrder) {
             destinationStop = null;
+            checkInStatus = null;
             return;
         }
+        boolean changed = destinationStop == null || !stop.id.equals(destinationStop.id);
         destinationStop = copyStop(stop);
+        if (changed) {
+            checkInStatus = null;
+        }
     }
 
     void syncBoardingRequest(BoardingRequestModel request) {
@@ -148,6 +205,8 @@ final class PassengerSelectionState {
             return;
         }
         boardingRequest = copyRequest(request);
+        bluetoothIdentifier = request.bluetoothIdentifier;
+        checkInStatus = request.status;
         if (request.trip != null) {
             selectTrip(request.trip);
         }
@@ -166,6 +225,8 @@ final class PassengerSelectionState {
         boardingStop = null;
         destinationStop = null;
         boardingRequest = null;
+        bluetoothIdentifier = null;
+        checkInStatus = null;
     }
 
     List<StopModel> destinationChoices() {
