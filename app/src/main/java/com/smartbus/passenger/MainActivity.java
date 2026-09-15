@@ -19,6 +19,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
@@ -47,11 +48,11 @@ import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.osmdroid.config.Configuration;
 import org.osmdroid.tileprovider.tilesource.XYTileSource;
 import org.osmdroid.util.BoundingBox;
@@ -75,6 +76,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_LOCAL_CHECKIN_PREFIX = "local_checkin_";
     private static final int MAX_LOCAL_CHECKINS = 5;
     private static final long TRACKING_REFRESH_MS = 12_000L;
+    private static final long ACCEPTANCE_POLL_MS = 2_000L;
+    private static final int MAX_FAST_SIGNAL_RETRIES = 3;
     private static final double AUTO_BOARDING_STOP_RADIUS_METERS = 50d;
     private static final int REQUEST_BLUETOOTH_CONNECT = 4101;
     private static final int REQUEST_LOCATION = 4102;
@@ -106,6 +109,8 @@ public class MainActivity extends AppCompatActivity {
     private SelectedTripStore selectedTripStore;
     private PassengerSelectionState selectionState;
     private PassengerDataRepository dataRepository;
+    private PassengerAiContextProvider aiContextProvider;
+    private PassengerAiContextSyncManager aiContextSyncManager;
     private final ExecutorService dataExecutor = Executors.newSingleThreadExecutor();
     private SharedPreferences preferences;
     private PassengerBluetoothManager bluetoothManager;
@@ -120,6 +125,10 @@ public class MainActivity extends AppCompatActivity {
     private boolean destroyed;
     private boolean pendingMapFit;
     private int pendingMapFitAttempts;
+    private List<GeoPoint> pendingMapPoints = new ArrayList<>();
+    private long lastAcceptedBoardingId;
+    private boolean acceptancePolling;
+    private final Runnable acceptancePollRunnable = this::pollDriverAcceptance;
     private boolean syncingBottomNavigation;
     private boolean syncingSelectionControls;
     private boolean syncingRouteControls;
@@ -168,6 +177,8 @@ public class MainActivity extends AppCompatActivity {
     private Spinner nearbyDestinationStopSpinner;
     private TextView nearbyBoardingStopText;
     private TextView trackingText;
+    private MaterialButton trackAcceptedTripButton;
+    private MaterialButton finishAcceptedTripButton;
     private TextView bluetoothStatusText;
     private ProgressBar tripProgress;
     private MaterialButton loginButton;
@@ -197,6 +208,15 @@ public class MainActivity extends AppCompatActivity {
         bindViews();
         applySystemInsets();
         setupActions();
+        Configuration.getInstance().load(
+                getApplicationContext(),
+                getSharedPreferences("osmdroid", MODE_PRIVATE)
+        );
+        Configuration.getInstance().setUserAgentValue(
+                BuildConfig.APPLICATION_ID + "/" + BuildConfig.VERSION_NAME
+        );
+        Configuration.getInstance().setTileDownloadThreads((short) 4);
+        Configuration.getInstance().setCacheMapTileCount((short) 200);
         setupMap();
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         selectedTripStore = new SelectedTripStore(preferences);
@@ -207,6 +227,11 @@ public class MainActivity extends AppCompatActivity {
                 preferences,
                 dataExecutor
         );
+        aiContextProvider = new PassengerAiContextProvider(
+                PassengerDatabase.getInstance(this),
+                dataExecutor
+        );
+        aiContextSyncManager = new PassengerAiContextSyncManager();
         bluetoothManager = new PassengerBluetoothManager(this);
         setAuthMode(false);
         addAiAssistantMessage("Tôi có thể trả lời dựa trên chuyến bạn đã đăng ký: vị trí xe, bến tiếp theo, bến xuống và tóm tắt hành trình.");
@@ -243,6 +268,9 @@ public class MainActivity extends AppCompatActivity {
             mapView.onDetach();
         }
         dataExecutor.shutdownNow();
+        if (aiContextSyncManager != null) {
+            aiContextSyncManager.shutdown();
+        }
         super.onDestroy();
     }
 
@@ -288,6 +316,8 @@ public class MainActivity extends AppCompatActivity {
         nearbyDestinationStopSpinner = findViewById(R.id.nearbyDestinationStopSpinner);
         nearbyBoardingStopText = findViewById(R.id.nearbyBoardingStopText);
         trackingText = findViewById(R.id.trackingText);
+        trackAcceptedTripButton = findViewById(R.id.trackAcceptedTripButton);
+        finishAcceptedTripButton = findViewById(R.id.finishAcceptedTripButton);
         bluetoothStatusText = findViewById(R.id.bluetoothStatusText);
         tripProgress = findViewById(R.id.tripProgress);
         loginButton = findViewById(R.id.loginButton);
@@ -343,6 +373,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.logoutButton).setOnClickListener(v -> logout());
         findViewById(R.id.findTripsButton).setOnClickListener(v -> findTrips());
         checkInButton.setOnClickListener(v -> handleCheckInButtonClick());
+        trackAcceptedTripButton.setOnClickListener(v -> showTab(TAB_MAP));
+        finishAcceptedTripButton.setOnClickListener(v -> finishAcceptedPassengerTrip());
         nearbyConfirmCheckInButton.setOnClickListener(v -> confirmNearbyCheckInSelection());
         homeFindRouteButton.setOnClickListener(v -> showTab(TAB_ROUTES));
         homeMyTripButton.setOnClickListener(v -> showTab(TAB_MY_TRIP));
@@ -534,8 +566,13 @@ public class MainActivity extends AppCompatActivity {
         );
         mapView.setTileSource(tileSource);
         mapView.setMultiTouchControls(true);
+        mapView.setTilesScaledToDpi(true);
+        mapView.setMinZoomLevel(3.0);
+        mapView.setMaxZoomLevel(19.0);
+        mapView.getOverlayManager().getTilesOverlay().setEnabled(true);
         mapView.getController().setZoom(13.0);
         mapView.getController().setCenter(new GeoPoint(10.7769, 106.7009));
+        mapView.invalidate();
     }
 
     private void register() {
@@ -599,6 +636,7 @@ public class MainActivity extends AppCompatActivity {
         restoreSelectedTripState();
         loadRoutes();
         loadRequests();
+        startAcceptedBoardingPolling();
     }
 
     private void restoreSelectedTripState() {
@@ -608,6 +646,7 @@ public class MainActivity extends AppCompatActivity {
         selectionState = selectedTripStore.state();
         if (selectionState == null
                 || (!selectionState.hasTrip() && selectionState.selectedRouteId() == null)) {
+            restoreSelectionStateFromRoom();
             return;
         }
         selectedRequest = selectionState.boardingRequest();
@@ -623,9 +662,35 @@ public class MainActivity extends AppCompatActivity {
         if (selectionState.hasTrip()) {
             startTrackingRefresh();
         }
+        if (currentBoardingRequest() != null) {
+            startAcceptedBoardingPolling();
+        }
+        restoreSelectionStateFromRoom();
+    }
+
+    private void restoreSelectionStateFromRoom() {
+        if (dataRepository == null) {
+            return;
+        }
+        dataRepository.loadSelectionFromRoom(state -> runOnUiThread(() -> {
+            if (destroyed || state == null) {
+                return;
+            }
+            selectionState = state;
+            selectedRequest = state.boardingRequest();
+            if (state.hasTrip()) {
+                syncSelectedRouteFromTrip(state.selectedTrip());
+            } else if (state.selectedRoute() != null) {
+                selectedRoute = state.selectedRoute();
+                loadStopsForSelectedTripRoute(state.selectedRouteId());
+            }
+            onSelectionStateChanged(false);
+        }));
     }
 
     private void logout() {
+        stopAcceptedBoardingPolling();
+        if (aiContextSyncManager != null) aiContextSyncManager.clearPending();
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
         }
@@ -659,11 +724,16 @@ public class MainActivity extends AppCompatActivity {
         tripProgress.setProgress(0);
         setAiLoading(false);
         aiQuestionInput.setText("");
+        pendingMapPoints.clear();
+        pendingMapFit = false;
+        pendingMapFitAttempts = 0;
         mapView.getOverlays().clear();
         setupMap();
     }
 
     private void clearExpiredSession() {
+        stopAcceptedBoardingPolling();
+        if (aiContextSyncManager != null) aiContextSyncManager.clearPending();
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
         }
@@ -683,6 +753,11 @@ public class MainActivity extends AppCompatActivity {
         selectedRoute = null;
         routes.clear();
         stops.clear();
+        pendingMapPoints.clear();
+        pendingMapFit = false;
+        pendingMapFitAttempts = 0;
+        mapView.getOverlays().clear();
+        setupMap();
         showAuth();
     }
 
@@ -1114,6 +1189,7 @@ public class MainActivity extends AppCompatActivity {
         if (request == null || request.id == null) {
             return;
         }
+        cancelFastBoardingSignalSilently(request);
         for (int i = localCheckIns.size() - 1; i >= 0; i--) {
             BoardingRequestModel existing = localCheckIns.get(i);
             if (existing != null && request.id.equals(existing.id)) {
@@ -1126,6 +1202,53 @@ public class MainActivity extends AppCompatActivity {
         persistLocalCheckIns();
         renderLocalCheckIns();
         toast("Đã xóa yêu cầu check-in local.");
+    }
+
+    private void cancelFastBoardingSignalSilently(BoardingRequestModel request) {
+        if (request == null || !"PENDING".equals(request.status)
+                || request.routeId == null || request.destinationStop == null
+                || request.destinationStop.id == null) {
+            return;
+        }
+        Long tripId = request.trip == null ? currentSelectedTripId() : request.trip.id;
+        callSilent(
+                RetrofitClient.api().cancelFastBoardingSignal(
+                        new FastBoardingSignalCancelRequest(
+                                request.fastSignalId,
+                                tripId,
+                                request.routeId,
+                                request.destinationStop.id,
+                                request.bluetoothIdentifier
+                        )
+                ),
+                ignored -> {
+                }
+        );
+    }
+
+    private boolean resetFinishedLocalRequestForNewSelection(BoardingRequestModel request) {
+        if (request == null || !isLocalCheckIn(request)
+                || !("BOARDED".equals(request.status)
+                || "COMPLETED".equals(request.status)
+                || "CANCELLED".equals(request.status))) {
+            return false;
+        }
+        for (int index = localCheckIns.size() - 1; index >= 0; index--) {
+            BoardingRequestModel local = localCheckIns.get(index);
+            if (local != null && request.id != null && request.id.equals(local.id)) {
+                localCheckIns.remove(index);
+            }
+        }
+        selectedRequest = null;
+        if (selectionState != null) {
+            // Keep the same trip/route/stops, but release the previous
+            // boarding request so the passenger can confirm a new request,
+            // including a second request with the same destination.
+            selectionState.syncBoardingRequest(null);
+        }
+        persistLocalCheckIns();
+        persistSelectionState();
+        return true;
     }
 
     private void loadLocalCheckIns() {
@@ -1152,6 +1275,10 @@ public class MainActivity extends AppCompatActivity {
         }
         BoardingRequestModel request = new BoardingRequestModel();
         request.id = id;
+        long fastSignalId = preferences.getLong(prefix + "fast_signal_id", Long.MIN_VALUE);
+        if (fastSignalId != Long.MIN_VALUE) {
+            request.fastSignalId = fastSignalId;
+        }
         request.passenger = currentPassenger;
         request.routeId = routeId;
         if (tripId != Long.MIN_VALUE) {
@@ -1208,6 +1335,8 @@ public class MainActivity extends AppCompatActivity {
     private void writeLocalCheckIn(SharedPreferences.Editor editor, int index, BoardingRequestModel request) {
         String prefix = KEY_LOCAL_CHECKIN_PREFIX + index + "_";
         editor.putLong(prefix + "id", request.id == null ? Long.MIN_VALUE : request.id);
+        editor.putLong(prefix + "fast_signal_id", request.fastSignalId == null
+                ? Long.MIN_VALUE : request.fastSignalId);
         editor.putLong(prefix + "trip_id", request.trip == null || request.trip.id == null ? Long.MIN_VALUE : request.trip.id);
         editor.putLong(prefix + "route_id", request.routeId != null
                 ? request.routeId
@@ -1365,6 +1494,7 @@ public class MainActivity extends AppCompatActivity {
         selectedTripStore.persist(selectionState);
         syncSelectedRouteFromTrip(selectionState.selectedTrip());
         onSelectionStateChanged(true);
+        pushAiContextInBackground();
         showLocalDropoffDistance(destination);
     }
 
@@ -1423,6 +1553,9 @@ public class MainActivity extends AppCompatActivity {
         updateBluetoothStatus();
         updateHomeSummary();
         updateSelectedTripMap(fitMapToSelection);
+        // Keep the accepted trip/current stop available to AI without coupling
+        // the background sync to rendering or network success.
+        pushAiContextInBackground();
     }
 
     private void persistSelectionState() {
@@ -1452,6 +1585,7 @@ public class MainActivity extends AppCompatActivity {
         nearbyTripsContainer.removeAllViews();
         tripsContainer.removeAllViews();
         trackingText.setText("Chưa chọn chuyến. Vào tab Tuyến xe để chọn tuyến, bến đi và bến xuống.");
+        setAcceptedTripActionsVisible(false);
         tripProgress.setProgress(0);
         updateBluetoothStatus();
         updateHomeSummary();
@@ -1514,6 +1648,7 @@ public class MainActivity extends AppCompatActivity {
         if (trackingText == null) {
             return;
         }
+        setAcceptedTripActionsVisible(false);
         TripModel trip = currentSelectedTrip();
         if (trip == null || trip.id == null) {
             RouteModel route = selectionState == null || selectionState.selectedRoute() == null
@@ -1539,6 +1674,19 @@ public class MainActivity extends AppCompatActivity {
                 ? selectedRoute
                 : selectionState.selectedRoute();
         BoardingRequestModel request = currentBoardingRequest();
+        if (request != null && "BOARDED".equals(request.status)) {
+            setAcceptedTripActionsVisible(true);
+            StopModel current = findStopById(trip.currentStopId);
+            String next = current == null || selectionState == null
+                    ? "đang xác định" : nextStopName(selectionState.routeStops(), current);
+            trackingText.setText("Đang trong chuyến #" + safeLong(trip.id)
+                    + "\nTuyến: " + routeLabel(route)
+                    + "\nBến gần vị trí của bạn: " + name(current)
+                    + "\nBến tiếp theo: " + next
+                    + "\nBến xuống: " + name(currentDestinationStop())
+                    + "\nTrạng thái: tài xế đã chấp nhận lên xe.");
+            return;
+        }
         String requestLine = request == null || request.id == null
                 ? "Yêu cầu check-in: chưa tạo"
                 : "Yêu cầu check-in #" + request.id + " · " + statusLabel(request.status);
@@ -1549,6 +1697,16 @@ public class MainActivity extends AppCompatActivity {
                 + "\nBến xuống: " + name(currentDestinationStop())
                 + "\nThông tin xe: " + (trip.driverId == null ? "backend chưa cung cấp" : "tài xế #" + safeLong(trip.driverId))
                 + "\n" + requestLine);
+    }
+
+    private void setAcceptedTripActionsVisible(boolean visible) {
+        int visibility = visible ? View.VISIBLE : View.GONE;
+        if (trackAcceptedTripButton != null) {
+            trackAcceptedTripButton.setVisibility(visibility);
+        }
+        if (finishAcceptedTripButton != null) {
+            finishAcceptedTripButton.setVisibility(visibility);
+        }
     }
 
     private void syncSelectedRouteFromTrip(TripModel trip) {
@@ -1610,6 +1768,9 @@ public class MainActivity extends AppCompatActivity {
             }
             renderStopsTimeline(null, null);
             renderMap(stops, null, null, currentTab == TAB_MAP);
+            if (currentBoardingRequest() != null && "BOARDED".equals(currentBoardingRequest().status)) {
+                updatePassengerNearestStop(currentSelectedTrip(), routeId);
+            }
             mapStatusText.setText(routeLabel(selectedRoute) + "\n" + stops.size() + " bến đang hiển thị."
                     + (fromCache ? "\nDữ liệu offline." : ""));
             onSelectionStateChanged(currentTab == TAB_MAP);
@@ -1645,6 +1806,43 @@ public class MainActivity extends AppCompatActivity {
             updateBluetoothStatus();
             stopTrackingRefresh();
         });
+    }
+
+    private void finishAcceptedPassengerTrip() {
+        BoardingRequestModel request = currentBoardingRequest();
+        if (request == null || request.id == null) {
+            // The button can remain visible for one frame while an acceptance
+            // poll is replacing the local snapshot. Still clear the accepted
+            // state so a stale click never becomes a no-op.
+            selectedRequest = null;
+            if (selectionState != null) {
+                selectionState.syncBoardingRequest(null);
+            }
+            setAcceptedTripActionsVisible(false);
+            onSelectionStateChanged(false);
+            return;
+        }
+        for (int index = localCheckIns.size() - 1; index >= 0; index--) {
+            BoardingRequestModel local = localCheckIns.get(index);
+            if (local != null && request.id.equals(local.id)) {
+                localCheckIns.remove(index);
+            }
+        }
+        selectedRequest = null;
+        if (bluetoothManager != null) {
+            bluetoothManager.stopAdvertising();
+        }
+        stopAcceptedBoardingPolling();
+        if (selectionState != null) {
+            // Keep the selected route/stops so a new request can be created
+            // immediately, but leave the accepted-trip state.
+            selectionState.syncBoardingRequest(null);
+        }
+        persistLocalCheckIns();
+        persistSelectionState();
+        renderLocalCheckIns();
+        onSelectionStateChanged(false);
+        toast("Đã xác nhận kết thúc chuyến.");
     }
 
     private void track(BoardingRequestModel request, boolean userInitiated) {
@@ -2213,6 +2411,7 @@ public class MainActivity extends AppCompatActivity {
     private void confirmNearbyCheckInSelection() {
         restoreSelectionStateIfNeeded();
         applyNearbySpinnerSelection();
+        resetFinishedLocalRequestForNewSelection(currentBoardingRequest());
         RouteModel route = selectionState == null || selectionState.selectedRoute() == null
                 ? selectedRoute
                 : selectionState.selectedRoute();
@@ -2235,6 +2434,7 @@ public class MainActivity extends AppCompatActivity {
         }
         persistSelectionState();
         onSelectionStateChanged(true);
+        pushAiContextInBackground();
         bluetoothStatusText.setText("Đã xác nhận tuyến #" + safeLong(route.id)
                 + "\nBến đi: " + name(currentBoardingStop())
                 + "\nBến xuống: " + name(currentDestinationStop())
@@ -2324,8 +2524,11 @@ public class MainActivity extends AppCompatActivity {
                 ? request.status
                 : (selectionState == null ? null : selectionState.checkInStatus());
         if ("BOARDED".equals(status) || "COMPLETED".equals(status)) {
-            toast("Yêu cầu này đã được xác nhận lên xe, không gửi check-in lần nữa.");
-            return;
+            if (!resetFinishedLocalRequestForNewSelection(request)) {
+                toast("Yêu cầu này đã được xác nhận lên xe, hãy đổi bến xuống để tạo yêu cầu mới.");
+                return;
+            }
+            request = currentBoardingRequest();
         }
         BluetoothConnectionState state = bluetoothManager.getState();
         if (state == BluetoothConnectionState.PERMISSION_REQUIRED) {
@@ -2368,7 +2571,14 @@ public class MainActivity extends AppCompatActivity {
                 identifier
         );
         boolean advertising = bluetoothManager.startAdvertising(event);
-        publishFastBoardingSignal(routeId, destination.id);
+        publishFastBoardingSignal(
+                routeId,
+                currentSelectedTripId(),
+                currentBoardingStop() == null ? null : currentBoardingStop().id,
+                destination.id,
+                identifier,
+                localRequest.id
+        );
         showLocalDropoffDistance(destination);
         updateBluetoothStatus();
         renderLocalCheckIns();
@@ -2376,19 +2586,291 @@ public class MainActivity extends AppCompatActivity {
                 + ": tuyến #" + safeLong(routeId));
     }
 
-    private void publishFastBoardingSignal(Long routeId, Long destinationStopId) {
+    private void publishFastBoardingSignal(Long routeId, Long tripId, Long boardingStopId,
+                                           Long destinationStopId, String passengerIdentifier,
+                                           Long localRequestId) {
         if (routeId == null || destinationStopId == null || destroyed) {
             return;
         }
         // Fire this lightweight route/stop signal independently from BLE. It is
         // intentionally silent so a slow/failing backend never changes check-in UX.
-        callSilent(
+        startAcceptedBoardingPolling();
+        publishFastBoardingSignal(routeId, tripId, boardingStopId, destinationStopId,
+                passengerIdentifier, localRequestId, 0);
+    }
+
+    private void publishFastBoardingSignal(Long routeId, Long tripId, Long boardingStopId,
+                                           Long destinationStopId, String passengerIdentifier,
+                                           Long localRequestId, int attempt) {
+        if (destroyed || !hasLocalCheckIn(localRequestId)) {
+            return;
+        }
+        Call<ApiResponse<FastBoardingSignalModel>> call =
                 RetrofitClient.api().publishFastBoardingSignal(
-                        new FastBoardingSignalRequest(routeId, destinationStopId)
+                new FastBoardingSignalRequest(
+                        routeId, tripId, boardingStopId, destinationStopId, passengerIdentifier
+                )
+        );
+        // This channel is intentionally short. A stalled general request
+        // timeout must not postpone the next silent retry for one minute.
+        call.timeout().timeout(5, TimeUnit.SECONDS);
+        call.enqueue(new Callback<>() {
+            @Override
+            public void onResponse(Call<ApiResponse<FastBoardingSignalModel>> call,
+                                   Response<ApiResponse<FastBoardingSignalModel>> response) {
+                if (destroyed) return;
+                ApiResponse<FastBoardingSignalModel> body = response.body();
+                if (response.isSuccessful() && body != null && body.success && body.data != null) {
+                    attachFastSignalId(localRequestId, routeId, tripId,
+                            destinationStopId, passengerIdentifier, body.data);
+                } else {
+                    retryFastBoardingSignal(routeId, tripId, boardingStopId, destinationStopId,
+                            passengerIdentifier, localRequestId, attempt, response.code());
+                }
+            }
+
+            @Override
+            public void onFailure(Call<ApiResponse<FastBoardingSignalModel>> call, Throwable throwable) {
+                retryFastBoardingSignal(routeId, tripId, boardingStopId, destinationStopId,
+                        passengerIdentifier, localRequestId, attempt, 0);
+            }
+        });
+    }
+
+    private void retryFastBoardingSignal(Long routeId, Long tripId, Long boardingStopId,
+                                         Long destinationStopId, String passengerIdentifier,
+                                         Long localRequestId, int attempt, int responseCode) {
+        // Retry only transient failures. 4xx means the payload/session is
+        // invalid and repeating it cannot make the request visible to a driver.
+        boolean transientFailure = responseCode == 0 || responseCode >= 500;
+        if (!transientFailure || attempt >= MAX_FAST_SIGNAL_RETRIES || destroyed) return;
+        long delay = 1_000L * (attempt + 1);
+        handler.postDelayed(() -> publishFastBoardingSignal(
+                routeId, tripId, boardingStopId, destinationStopId, passengerIdentifier,
+                localRequestId, attempt + 1), delay);
+    }
+
+    private boolean hasLocalCheckIn(Long localRequestId) {
+        if (localRequestId == null) return false;
+        for (BoardingRequestModel request : localCheckIns) {
+            if (request != null && localRequestId.equals(request.id)) return true;
+        }
+        BoardingRequestModel selected = currentBoardingRequest();
+        return selected != null && localRequestId.equals(selected.id);
+    }
+
+    private void attachFastSignalId(Long localRequestId, Long routeId, Long tripId,
+                                    Long destinationStopId, String passengerIdentifier,
+                                    FastBoardingSignalModel signal) {
+        if (signal == null || signal.id == null) return;
+        for (BoardingRequestModel request : localCheckIns) {
+            if (request != null && localRequestId != null && localRequestId.equals(request.id)) {
+                request.fastSignalId = signal.id;
+                persistLocalCheckIns();
+                return;
+            }
+        }
+        // Cancellation can win the race against a slow publish response. If
+        // the local request is already gone, cancel the late server signal by
+        // its returned ID so it cannot reappear on the driver's next poll.
+        callSilent(
+                RetrofitClient.api().cancelFastBoardingSignal(
+                        new FastBoardingSignalCancelRequest(
+                                signal.id, tripId, routeId, destinationStopId, passengerIdentifier
+                        )
                 ),
                 ignored -> {
                 }
         );
+    }
+
+    private void startAcceptedBoardingPolling() {
+        if (destroyed || acceptancePolling || RetrofitClient.api() == null) {
+            return;
+        }
+        acceptancePolling = true;
+        handler.removeCallbacks(acceptancePollRunnable);
+        handler.post(acceptancePollRunnable);
+    }
+
+    private void stopAcceptedBoardingPolling() {
+        acceptancePolling = false;
+        handler.removeCallbacks(acceptancePollRunnable);
+        lastAcceptedBoardingId = 0L;
+    }
+
+    private void pollDriverAcceptance() {
+        if (!acceptancePolling || destroyed) {
+            return;
+        }
+        callSilent(
+                RetrofitClient.api().pollAcceptedBoardingSignals(lastAcceptedBoardingId),
+                accepted -> {
+                    if (accepted != null) {
+                        for (FastBoardingAcceptanceModel event : accepted) {
+                            if (event == null || event.id == null || event.id <= lastAcceptedBoardingId) {
+                                continue;
+                            }
+                            lastAcceptedBoardingId = Math.max(lastAcceptedBoardingId, event.id);
+                            applyDriverAcceptance(event);
+                        }
+                    }
+                    scheduleAcceptancePoll();
+                },
+                this::scheduleAcceptancePoll
+        );
+    }
+
+    private void scheduleAcceptancePoll() {
+        if (acceptancePolling && !destroyed) {
+            handler.postDelayed(acceptancePollRunnable, ACCEPTANCE_POLL_MS);
+        }
+    }
+
+    private void applyDriverAcceptance(FastBoardingAcceptanceModel event) {
+        if (event.tripId == null || event.routeId == null
+                || !"BOARDED".equals(event.status)) {
+            return;
+        }
+        StopModel previousBoarding = currentBoardingStop();
+        StopModel previousDestination = currentDestinationStop();
+        TripModel trip = currentSelectedTrip();
+        if (trip == null) {
+            trip = new TripModel();
+        }
+        trip.id = event.tripId;
+        trip.routeId = event.routeId;
+        trip.status = "IN_PROGRESS";
+        RouteModel acceptedRoute = routeById(event.routeId);
+        if (acceptedRoute != null) {
+            selectedRoute = acceptedRoute;
+        } else if (selectedRoute == null || !event.routeId.equals(selectedRoute.id)) {
+            selectedRoute = placeholderRoute(event.routeId);
+        }
+        if (selectionState == null) {
+            selectionState = selectedTripStore == null
+                    ? new PassengerSelectionState() : selectedTripStore.state();
+        }
+        selectionState.selectTrip(trip);
+        selectionState.setRoute(selectedRoute);
+        StopModel boarding = findStopById(event.boardingStopId);
+        StopModel destination = findStopById(event.destinationStopId);
+        if (boarding == null) boarding = previousBoarding;
+        if (destination == null) destination = previousDestination;
+        selectionState.setBoardingStop(boarding);
+        selectionState.setDestinationStop(destination);
+
+        BoardingRequestModel acceptedRequest = findLocalCheckIn(event);
+        if (acceptedRequest == null) {
+            acceptedRequest = new BoardingRequestModel();
+            acceptedRequest.id = event.signalId == null ? System.currentTimeMillis() : event.signalId;
+            acceptedRequest.note = "LOCAL_BLE_CHECKIN";
+            acceptedRequest.bluetoothIdentifier = selectionState.bluetoothIdentifier();
+        }
+        acceptedRequest.routeId = event.routeId;
+        acceptedRequest.trip = copyTrip(trip);
+        acceptedRequest.boardingStop = copyStop(boarding);
+        acceptedRequest.destinationStop = copyStop(destination);
+        acceptedRequest.status = "BOARDED";
+        selectedRequest = acceptedRequest;
+        replaceLocalCheckIn(acceptedRequest);
+        syncSelectedRequest(acceptedRequest);
+        loadStopsForSelectedTripRoute(event.routeId);
+        updatePassengerNearestStop(trip, event.routeId);
+        onSelectionStateChanged(false);
+        startTrackingRefresh();
+        addStatusMessage("Tài xế đã chấp nhận bạn lên chuyến #" + safeLong(event.tripId)
+                + ". Đang trên tuyến " + routeLabel(selectedRoute) + ".");
+    }
+
+    private void addStatusMessage(String message) {
+        if (bluetoothStatusText != null && message != null) {
+            bluetoothStatusText.setText(message);
+        }
+        toast(message);
+    }
+
+    private BoardingRequestModel findLocalCheckIn(FastBoardingAcceptanceModel event) {
+        for (BoardingRequestModel request : localCheckIns) {
+            if (request == null) continue;
+            Long routeId = request.routeId != null ? request.routeId
+                    : request.trip == null ? null : request.trip.routeId;
+            if (event.routeId.equals(routeId)
+                    && (event.destinationStopId == null || request.destinationStop == null
+                    || event.destinationStopId.equals(request.destinationStop.id))) {
+                return request;
+            }
+        }
+        return null;
+    }
+
+    private void replaceLocalCheckIn(BoardingRequestModel accepted) {
+        boolean replaced = false;
+        for (int index = 0; index < localCheckIns.size(); index++) {
+            BoardingRequestModel current = localCheckIns.get(index);
+            if (current == accepted || (current != null && accepted.id != null && accepted.id.equals(current.id))) {
+                localCheckIns.set(index, accepted);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) localCheckIns.add(accepted);
+        persistLocalCheckIns();
+        renderLocalCheckIns();
+    }
+
+    private StopModel findStopById(Long stopId) {
+        if (stopId == null) return null;
+        for (StopModel stop : stops) {
+            if (stop != null && stopId.equals(stop.id)) return stop;
+        }
+        if (selectionState != null) {
+            for (StopModel stop : selectionState.routeStops()) {
+                if (stop != null && stopId.equals(stop.id)) return stop;
+            }
+        }
+        return null;
+    }
+
+    private void updatePassengerNearestStop(TripModel trip, Long routeId) {
+        if (trip == null || selectionState == null) return;
+        Location location = currentLocation != null ? currentLocation : lastKnownLocation();
+        List<StopModel> routeStops = selectionState.routeStops();
+        if (routeStops.isEmpty() && routeId != null) routeStops = new ArrayList<>(stops);
+        if (location == null || routeStops.isEmpty()) return;
+        StopModel nearest = null;
+        float nearestDistance = Float.MAX_VALUE;
+        for (StopModel stop : routeStops) {
+            if (!validStopCoordinates(stop)) continue;
+            float[] distance = new float[1];
+            Location.distanceBetween(location.getLatitude(), location.getLongitude(),
+                    stop.latitude.doubleValue(), stop.longitude.doubleValue(), distance);
+            if (distance[0] < nearestDistance) {
+                nearestDistance = distance[0];
+                nearest = stop;
+            }
+        }
+        if (nearest == null) return;
+        trip.currentStopId = nearest.id;
+        trip.currentLatitude = java.math.BigDecimal.valueOf(location.getLatitude());
+        trip.currentLongitude = java.math.BigDecimal.valueOf(location.getLongitude());
+        String next = nextStopName(routeStops, nearest);
+        trackingText.setText("Đang trên chuyến #" + safeLong(trip.id)
+                + "\nBến gần vị trí của bạn: " + name(nearest)
+                + "\nBến tiếp theo: " + next);
+        homeSummaryText.setText("Đang trên chuyến #" + safeLong(trip.id)
+                + "\nBến gần bạn: " + name(nearest)
+                + "\nBến tiếp theo: " + next);
+    }
+
+    private String nextStopName(List<StopModel> routeStops, StopModel current) {
+        StopModel next = null;
+        for (StopModel stop : routeStops) {
+            if (stop != null && stop.stopOrder != null && current.stopOrder != null
+                    && stop.stopOrder > current.stopOrder
+                    && (next == null || stop.stopOrder < next.stopOrder)) next = stop;
+        }
+        return next == null ? "hết tuyến" : name(next);
     }
 
     private void showLocalDropoffDistance(StopModel destination) {
@@ -2491,7 +2973,7 @@ public class MainActivity extends AppCompatActivity {
         List<GeoPoint> points = new ArrayList<>();
         for (int index = 0; index < routeStops.size(); index++) {
             StopModel stop = routeStops.get(index);
-            if (stop == null || stop.latitude == null || stop.longitude == null) {
+            if (stop == null || !validCoordinate(stop.latitude, stop.longitude)) {
                 continue;
             }
             GeoPoint point = new GeoPoint(stop.latitude.doubleValue(), stop.longitude.doubleValue());
@@ -2522,6 +3004,7 @@ public class MainActivity extends AppCompatActivity {
             marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
             mapView.getOverlays().add(marker);
         }
+        pendingMapPoints = new ArrayList<>(points);
         addSelectedRoutePathOverlay();
         addBusMarkerIfAvailable();
         addPassengerLocationMarker();
@@ -2545,7 +3028,9 @@ public class MainActivity extends AppCompatActivity {
             }
             return;
         }
-        List<GeoPoint> points = routePoints(stops);
+        List<GeoPoint> points = pendingMapPoints.isEmpty()
+                ? routePoints(stops)
+                : new ArrayList<>(pendingMapPoints);
         if (points.size() > 1) {
             pendingMapFit = false;
             pendingMapFitAttempts = 0;
@@ -2564,7 +3049,7 @@ public class MainActivity extends AppCompatActivity {
             return points;
         }
         for (StopModel stop : routeStops) {
-            if (stop != null && stop.latitude != null && stop.longitude != null) {
+            if (stop != null && validCoordinate(stop.latitude, stop.longitude)) {
                 points.add(new GeoPoint(stop.latitude.doubleValue(), stop.longitude.doubleValue()));
             }
         }
@@ -2673,7 +3158,7 @@ public class MainActivity extends AppCompatActivity {
             }
             selectedRoutePathPoints.clear();
             for (RoutePathPointModel point : data.points) {
-                if (point != null && point.latitude != null && point.longitude != null) {
+                if (point != null && validCoordinate(point.latitude, point.longitude)) {
                     selectedRoutePathPoints.add(new GeoPoint(
                             point.latitude.doubleValue(),
                             point.longitude.doubleValue()
@@ -2703,7 +3188,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean validStopCoordinates(StopModel stop) {
-        return stop != null && stop.id != null && stop.latitude != null && stop.longitude != null;
+        return stop != null && stop.id != null && validCoordinate(stop.latitude, stop.longitude);
+    }
+
+    private boolean validCoordinate(java.math.BigDecimal latitude, java.math.BigDecimal longitude) {
+        if (latitude == null || longitude == null) {
+            return false;
+        }
+        double lat = latitude.doubleValue();
+        double lng = longitude.doubleValue();
+        return !Double.isNaN(lat) && !Double.isInfinite(lat)
+                && !Double.isNaN(lng) && !Double.isInfinite(lng)
+                && lat >= -90d && lat <= 90d
+                && lng >= -180d && lng <= 180d
+                && (lat != 0d || lng != 0d);
     }
 
     private void addSelectedRoutePathOverlay() {
@@ -2752,7 +3250,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void addBusMarkerIfAvailable() {
         TripModel trip = currentSelectedTrip();
-        if (trip == null || trip.currentLatitude == null || trip.currentLongitude == null) {
+        if (trip == null || !validCoordinate(trip.currentLatitude, trip.currentLongitude)) {
             return;
         }
         Marker bus = new Marker(mapView);
@@ -2870,6 +3368,19 @@ public class MainActivity extends AppCompatActivity {
                 ? "Chưa chọn tuyến. Mở tab Tuyến xe để tìm chuyến phù hợp."
                 : "Tuyến đang chọn: " + routeLabel(route);
         BoardingRequestModel request = currentBoardingRequest();
+        if (request != null && "BOARDED".equals(request.status)) {
+            TripModel trip = currentSelectedTrip();
+            StopModel current = trip == null ? null : findStopById(trip.currentStopId);
+            String next = current == null || selectionState == null
+                    ? "đang xác định" : nextStopName(selectionState.routeStops(), current);
+            homeSummaryText.setText("Đang trong chuyến #" + safeLong(trip == null ? null : trip.id)
+                    + " · Đã được tài xế chấp nhận"
+                    + "\nTuyến: " + routeLabel(route)
+                    + "\nBến gần vị trí của bạn: " + name(current)
+                    + "\nBến tiếp theo: " + next
+                    + "\nBến xuống: " + name(currentDestinationStop()));
+            return;
+        }
         String requestLine = request == null
                 ? selectedTripSummary()
                 : "Chuyến của tôi: yêu cầu #" + request.id
@@ -2908,37 +3419,116 @@ public class MainActivity extends AppCompatActivity {
             toast("Vui lòng nhập câu hỏi cho trợ lý AI.");
             return;
         }
-        Long tripId = currentSelectedTripId();
-        if (tripId == null) {
-            toast("Hãy chọn chuyến trước để AI có dữ liệu backend trả lời.");
-            return;
-        }
         String trimmed = question.trim();
         addAiUserMessage(trimmed);
         aiQuestionInput.setText("");
         setAiLoading(true);
-        call(RetrofitClient.api().aiChat(new AiAssistantRequest(tripId, trimmed, buildPassengerAiClientContext())), data -> {
-            setAiLoading(false);
-            addAiAssistantMessage(data.answer == null || data.answer.isBlank()
-                    ? "Backend chưa trả về câu trả lời AI."
-                    : data.answer);
-        }, () -> setAiLoading(false));
+        aiContextProvider.load(selectionState, context -> runOnUiThread(() -> {
+            if (destroyed) return;
+            if (aiContextSyncManager != null) {
+                aiContextSyncManager.submit(context);
+            }
+            Long tripId = numberValue(context.get("selectedTripId"));
+            Long routeId = numberValue(context.get("selectedRouteId"));
+            if (tripId == null && routeId == null) {
+                setAiLoading(false);
+                addAiAssistantMessage("Chưa có tuyến hoặc chuyến được chọn để đối chiếu backend.");
+                return;
+            }
+            call(RetrofitClient.api().aiChat(new AiAssistantRequest(tripId, routeId, trimmed, context)), data -> {
+                setAiLoading(false);
+                addAiAssistantMessage(data.answer == null || data.answer.isBlank()
+                        ? "Backend chưa trả về câu trả lời AI."
+                        : data.answer);
+            }, () -> setAiLoading(false));
+        }));
     }
 
     private void requestAiSummary() {
-        Long tripId = currentSelectedTripId();
-        if (tripId == null) {
-            toast("Hãy chọn chuyến trước để AI tóm tắt hành trình.");
-            return;
-        }
         addAiUserMessage("Tóm tắt hành trình của tôi");
         setAiLoading(true);
-        call(RetrofitClient.api().aiSummary(new AiSummaryRequest(tripId, buildPassengerAiClientContext())), data -> {
-            setAiLoading(false);
-            addAiAssistantMessage(data.answer == null || data.answer.isBlank()
-                    ? "Backend chưa trả về tóm tắt."
-                    : data.answer);
-        }, () -> setAiLoading(false));
+        aiContextProvider.load(selectionState, context -> runOnUiThread(() -> {
+            if (destroyed) return;
+            if (aiContextSyncManager != null) {
+                aiContextSyncManager.submit(context);
+            }
+            Long tripId = numberValue(context.get("selectedTripId"));
+            Long routeId = numberValue(context.get("selectedRouteId"));
+            if (tripId == null && routeId == null) {
+                setAiLoading(false);
+                addAiAssistantMessage("Chưa có tuyến hoặc chuyến được chọn để đối chiếu backend.");
+                return;
+            }
+            call(RetrofitClient.api().aiSummary(new AiSummaryRequest(tripId, routeId, context)), data -> {
+                setAiLoading(false);
+                addAiAssistantMessage(data.answer == null || data.answer.isBlank()
+                        ? "Backend chưa trả về tóm tắt."
+                        : data.answer);
+            }, () -> setAiLoading(false));
+        }));
+    }
+
+    private void pushAiContextInBackground() {
+        if (destroyed || aiContextProvider == null || aiContextSyncManager == null) return;
+        aiContextProvider.load(selectionState, context -> {
+            if (!destroyed) aiContextSyncManager.submit(context);
+        });
+    }
+
+    private String answerFromLocalContext(String question, Map<String, Object> context) {
+        if (context == null) return null;
+        String q = question.toLowerCase(java.util.Locale.ROOT);
+        String trip = value(context.get("selectedTripName"));
+        String route = value(context.get("selectedRouteLabel"));
+        String boarding = value(context.get("boardingStopName"));
+        String destination = value(context.get("destinationStopName"));
+        String stops = value(context.get("stopsOnRoute"));
+        if (q.contains("check-in") || q.contains("check in") || q.contains("checkin")) {
+            String status = value(context.get("checkInStatus"));
+            return status == null ? "Bạn chưa check-in." : "Trạng thái check-in hiện tại: " + status + ".";
+        }
+        if (q.contains("bến xuống") || q.contains("điểm xuống")) {
+            return destination == null ? "Bạn chưa chọn bến xuống." : "Bến xuống của bạn là " + destination + ".";
+        }
+        if (q.contains("bến đi") || q.contains("lên ở đâu")) {
+            return boarding == null ? "Bạn chưa chọn bến đi." : "Bạn lên xe tại " + boarding + ".";
+        }
+        if (q.contains("những bến") || q.contains("các bến") || q.contains("bao nhiêu bến")) {
+            return stops == null || stops.isBlank() ? null : "Các bến của tuyến là: " + stops + ".";
+        }
+        if (q.contains("chuyến") || q.contains("tuyến") || q.contains("đang đi tuyến")) {
+            if (trip != null && route != null) return "Bạn đang chọn " + trip + " trên " + route + ".";
+            if (route != null) return "Bạn đang chọn " + route + ".";
+        }
+        if (q.contains("tóm tắt")) {
+            if (route == null && trip == null) return "Chưa có chuyến hoặc tuyến được chọn trên máy.";
+            return "Tóm tắt local: " + (trip == null ? "chưa chọn chuyến" : trip)
+                    + (route == null ? "" : " · " + route)
+                    + "; bến đi: " + (boarding == null ? "chưa chọn" : boarding)
+                    + "; bến xuống: " + (destination == null ? "chưa chọn" : destination) + ".";
+        }
+        if (q.contains("bến tiếp theo")) {
+            String next = value(context.get("nextStopName"));
+            return next == null ? null : "Bến tiếp theo là " + next + ".";
+        }
+        if (q.contains("xe đang ở đâu") || q.contains("xe ở đâu")) {
+            String lat = value(context.get("currentLatitude"));
+            String lng = value(context.get("currentLongitude"));
+            return lat == null || lng == null ? null : "Vị trí local gần nhất của xe: " + lat + ", " + lng + ".";
+        }
+        return null;
+    }
+
+    private Long numberValue(Object raw) {
+        if (raw instanceof Number number) return number.longValue();
+        if (raw instanceof String text) {
+            try { return Long.parseLong(text); } catch (NumberFormatException ignored) { }
+        }
+        return null;
+    }
+
+    private String value(Object raw) {
+        return raw == null || String.valueOf(raw).isBlank() || "null".equals(raw) ? null : String.valueOf(raw);
     }
 
     private Long currentSelectedTripId() {
@@ -2959,54 +3549,8 @@ public class MainActivity extends AppCompatActivity {
         return route == null ? null : route.id;
     }
 
-    private Map<String, Object> buildPassengerAiClientContext() {
-        Map<String, Object> context = new LinkedHashMap<>();
-        TripModel trip = currentSelectedTrip();
-        context.put("app", "smartbus-passenger");
-        context.put("currentTab", currentTab);
-        RouteModel route = selectionState == null || selectionState.selectedRoute() == null
-                ? selectedRoute
-                : selectionState.selectedRoute();
-        context.put("selectedRouteId", selectionState == null ? (trip == null ? null : trip.routeId) : selectionState.selectedRouteId());
-        context.put("selectedRouteLabel", route == null ? null : routeLabel(route));
-        context.put("selectedTripId", currentSelectedTripId());
-
-        StopModel selectedBoarding = currentBoardingStop();
-        StopModel selectedDestination = currentDestinationStop();
-        putStopContext(context, "selectedBoardingStop", selectedBoarding);
-        putStopContext(context, "selectedDestinationStop", selectedDestination);
-        putStopContext(context, "nearbyStop", nearbySuggestedBoardingStop);
-        context.put("nearbyStopDistanceMeters", nearbySuggestedDistanceMeters);
-        context.put("autoBoardingAllowed", nearbyAutoBoardingAllowed);
-
-        Location location = currentLocation != null ? currentLocation : lastKnownLocation();
-        if (location != null) {
-            context.put("currentLatitude", location.getLatitude());
-            context.put("currentLongitude", location.getLongitude());
-            context.put("currentAccuracyMeters", location.hasAccuracy() ? location.getAccuracy() : null);
-        }
-        BoardingRequestModel request = currentBoardingRequest();
-        if (request != null) {
-            context.put("boardingRequestId", request.id);
-            context.put("boardingRequestStatus", request.status);
-            context.put("bluetoothIdentifier", request.bluetoothIdentifier);
-        } else if (selectionState != null) {
-            context.put("boardingRequestStatus", selectionState.checkInStatus());
-            context.put("bluetoothIdentifier", selectionState.bluetoothIdentifier());
-        }
-        return context;
-    }
-
     private boolean validStop(StopModel stop) {
         return stop != null && stop.id != null;
-    }
-
-    private void putStopContext(Map<String, Object> context, String prefix, StopModel stop) {
-        context.put(prefix + "Id", stop == null ? null : stop.id);
-        context.put(prefix + "Name", stop == null ? null : name(stop));
-        context.put(prefix + "Order", stop == null ? null : stop.stopOrder);
-        context.put(prefix + "Latitude", stop == null ? null : stop.latitude);
-        context.put(prefix + "Longitude", stop == null ? null : stop.longitude);
     }
 
     private void setAiLoading(boolean loading) {
@@ -3185,7 +3729,24 @@ public class MainActivity extends AppCompatActivity {
 
     private void toast(String message) {
         if (!destroyed && rootShell != null) {
-            Snackbar.make(rootShell, message, Snackbar.LENGTH_LONG).show();
+            Snackbar snackbar = Snackbar.make(rootShell, message, Snackbar.LENGTH_LONG);
+            View snackbarView = snackbar.getView();
+            final float[] downY = new float[1];
+            snackbarView.setOnTouchListener((view, event) -> {
+                if (event == null) return false;
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    downY[0] = event.getRawY();
+                    return true;
+                }
+                if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                    if (event.getRawY() - downY[0] > 36f) {
+                        snackbar.dismiss();
+                    }
+                    return true;
+                }
+                return true;
+            });
+            snackbar.show();
         }
     }
 

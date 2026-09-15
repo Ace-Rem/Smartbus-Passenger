@@ -198,6 +198,8 @@ final class PassengerSelectionState {
     void syncBoardingRequest(BoardingRequestModel request) {
         if (request == null) {
             boardingRequest = null;
+            checkInStatus = null;
+            bluetoothIdentifier = null;
             return;
         }
         Long requestTripId = request.trip == null ? null : request.trip.id;
@@ -207,13 +209,16 @@ final class PassengerSelectionState {
         boardingRequest = copyRequest(request);
         bluetoothIdentifier = request.bluetoothIdentifier;
         checkInStatus = request.status;
-        if (request.trip != null) {
+        // A backend request may describe an older snapshot of the same trip.
+        // Keep the local current trip authoritative and only use the request
+        // to fill a genuinely missing trip.
+        if (request.trip != null && !hasTrip()) {
             selectTrip(request.trip);
         }
-        if (request.boardingStop != null) {
+        if (boardingStop == null && request.boardingStop != null) {
             boardingStop = copyStop(request.boardingStop);
         }
-        if (request.destinationStop != null) {
+        if (destinationStop == null && request.destinationStop != null) {
             destinationStop = copyStop(request.destinationStop);
         }
     }

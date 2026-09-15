@@ -17,6 +17,10 @@ final class PassengerDataRepository {
         void onError(Throwable throwable);
     }
 
+    interface SelectionCallback {
+        void onSelection(PassengerSelectionState state);
+    }
+
     private final SmartBusApi api;
     private final PassengerRouteDao routeDao;
     private final PassengerStopDao stopDao;
@@ -177,6 +181,95 @@ final class PassengerDataRepository {
 
     void clearSelection() {
         executor.execute(selectionDao::clear);
+    }
+
+    /**
+     * Restores the current selection from Room. SharedPreferences remains a
+     * UI fallback for the first frame, but Room is the durable source used by
+     * the AI and by the post-restart reconciliation below.
+     */
+    void loadSelectionFromRoom(SelectionCallback callback) {
+        executor.execute(() -> {
+            CachedSelectedTripEntity entity = selectionDao.selected();
+            if (entity == null) {
+                callback.onSelection(null);
+                return;
+            }
+            PassengerSelectionState state = new PassengerSelectionState();
+            TripModel trip = entity.tripId == null ? null : PassengerCacheMapper.toModel(tripDao.trip(entity.tripId));
+            if (trip == null && entity.tripId != null) {
+                trip = new TripModel();
+                trip.id = entity.tripId;
+                trip.routeId = entity.routeId;
+                trip.status = entity.tripStatus;
+                trip.currentStopId = entity.currentStopId;
+                trip.currentLatitude = java.math.BigDecimal.valueOf(entity.currentLatitude);
+                trip.currentLongitude = java.math.BigDecimal.valueOf(entity.currentLongitude);
+            }
+            if (trip != null) {
+                state.selectTrip(trip);
+            }
+            RouteModel route = entity.routeId == null ? null : PassengerCacheMapper.toModel(routeDao.route(entity.routeId));
+            if (route != null) {
+                state.setRoute(route);
+            }
+            StopModel boarding = selectedStop(entity, true);
+            StopModel destination = selectedStop(entity, false);
+            if (boarding != null) {
+                state.setBoardingStop(boarding);
+            }
+            if (destination != null) {
+                state.setDestinationStop(destination);
+            }
+            if (entity.boardingRequestId != null || entity.boardingRequestStatus != null) {
+                state.restoreLocalSelection(entity.bluetoothIdentifier, entity.boardingRequestStatus);
+            }
+            List<StopModel> routeStops = entity.routeId == null
+                    ? new ArrayList<>()
+                    : PassengerCacheMapper.stops(stopDao.stopsByRoute(entity.routeId));
+            state.setRouteStops(routeStops);
+            // setRouteStops validates the selections against the cache. Keep
+            // valid persisted stops even when the cache is only partial.
+            if (boarding != null && state.boardingStop() == null) {
+                state.setBoardingStop(boarding);
+            }
+            if (destination != null && state.destinationStop() == null) {
+                state.setDestinationStop(destination);
+            }
+            if (entity.boardingRequestId != null) {
+                BoardingRequestModel request = new BoardingRequestModel();
+                request.id = entity.boardingRequestId;
+                request.trip = PassengerSelectionState.copyTrip(trip);
+                request.boardingStop = PassengerSelectionState.copyStop(boarding);
+                request.destinationStop = PassengerSelectionState.copyStop(destination);
+                request.status = entity.boardingRequestStatus;
+                request.bluetoothIdentifier = entity.bluetoothIdentifier;
+                state.syncBoardingRequest(request);
+            }
+            callback.onSelection(state);
+        });
+    }
+
+    private StopModel selectedStop(CachedSelectedTripEntity entity, boolean boarding) {
+        Long id = boarding ? entity.boardingStopId : entity.destinationStopId;
+        if (id == null) {
+            return null;
+        }
+        StopModel stop = new StopModel();
+        stop.id = id;
+        stop.routeId = entity.routeId;
+        if (boarding) {
+            stop.name = entity.boardingStopName;
+            stop.latitude = java.math.BigDecimal.valueOf(entity.boardingLatitude);
+            stop.longitude = java.math.BigDecimal.valueOf(entity.boardingLongitude);
+            stop.stopOrder = entity.boardingStopOrder;
+        } else {
+            stop.name = entity.destinationStopName;
+            stop.latitude = java.math.BigDecimal.valueOf(entity.destinationLatitude);
+            stop.longitude = java.math.BigDecimal.valueOf(entity.destinationLongitude);
+            stop.stopOrder = entity.destinationStopOrder;
+        }
+        return stop;
     }
 
     private List<TripModel> listTripsForRoute(long routeId) {

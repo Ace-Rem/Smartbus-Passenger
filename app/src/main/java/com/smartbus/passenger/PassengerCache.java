@@ -108,6 +108,9 @@ interface PassengerTripDao {
     @Query("SELECT * FROM trips WHERE routeId = :routeId ORDER BY startedAt DESC")
     List<CachedTripEntity> tripsByRoute(long routeId);
 
+    @Query("SELECT * FROM trips WHERE id = :id LIMIT 1")
+    CachedTripEntity trip(long id);
+
     @Query("SELECT * FROM trips ORDER BY startedAt DESC")
     List<CachedTripEntity> allTrips();
 }

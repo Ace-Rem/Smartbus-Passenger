@@ -106,16 +106,16 @@ final class SelectedTripStore {
         if (selection.tripId != null && requestTripId != null && !selection.tripId.equals(requestTripId)) {
             return;
         }
-        if (request.trip != null) {
+        if (request.trip != null && selection.tripId == null) {
             selectTrip(request.trip, request.boardingStop, request.destinationStop);
         }
         selection.boardingRequestId = request.id;
         selection.boardingRequestStatus = request.status;
         selection.bluetoothIdentifier = request.bluetoothIdentifier;
-        if (request.boardingStop != null && request.boardingStop.id != null) {
+        if (selection.boardingStop == null && request.boardingStop != null && request.boardingStop.id != null) {
             selection.boardingStop = copyStop(request.boardingStop);
         }
-        if (request.destinationStop != null && request.destinationStop.id != null) {
+        if (selection.destinationStop == null && request.destinationStop != null && request.destinationStop.id != null) {
             selection.destinationStop = copyStop(request.destinationStop);
         }
         persist();

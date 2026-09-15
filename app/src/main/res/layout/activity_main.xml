@@ -680,6 +680,28 @@
                                 android:textColor="@color/smartbus_text_primary"
                                 android:textSize="15sp" />
 
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/trackAcceptedTripButton"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="10dp"
+                                android:text="Theo dõi"
+                                android:textColor="@color/white"
+                                android:visibility="gone"
+                                app:backgroundTint="@color/smartbus_primary" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/finishAcceptedTripButton"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="Xác nhận kết thúc chuyến"
+                                android:textColor="@color/smartbus_primary"
+                                android:visibility="gone"
+                                app:backgroundTint="@color/smartbus_surface"
+                                app:strokeColor="@color/smartbus_primary"
+                                app:strokeWidth="1dp" />
+
                             <ProgressBar
                                 android:id="@+id/tripProgress"
                                 style="?android:attr/progressBarStyleHorizontal"

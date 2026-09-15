@@ -64,6 +64,16 @@ public interface SmartBusApi {
             @Body FastBoardingSignalRequest request
     );
 
+    @POST("fast-boarding-signals/cancel")
+    Call<ApiResponse<FastBoardingSignalModel>> cancelFastBoardingSignal(
+            @Body FastBoardingSignalCancelRequest request
+    );
+
+    @GET("fast-boarding-signals/accepted")
+    Call<ApiResponse<List<FastBoardingAcceptanceModel>>> pollAcceptedBoardingSignals(
+            @Query("afterId") long afterId
+    );
+
     @GET("boarding-requests/mine")
     Call<ApiResponse<List<BoardingRequestModel>>> myRequests();
 
@@ -78,6 +88,9 @@ public interface SmartBusApi {
 
     @POST("ai/summary")
     Call<ApiResponse<AiAssistantResponse>> aiSummary(@Body AiSummaryRequest request);
+
+    @POST("ai/context")
+    Call<ApiResponse<AiContextSyncResponse>> syncAiContext(@Body AiContextSyncRequest request);
 }
 
 final class RetrofitClient {
@@ -173,10 +186,21 @@ class CreateBoardingRequest {
 class FastBoardingSignalRequest {
     final Long routeId;
     final Long destinationStopId;
+    final Long tripId;
+    final Long boardingStopId;
+    final String passengerIdentifier;
 
     FastBoardingSignalRequest(Long routeId, Long destinationStopId) {
+        this(routeId, null, null, destinationStopId, null);
+    }
+
+    FastBoardingSignalRequest(Long routeId, Long tripId, Long boardingStopId,
+                              Long destinationStopId, String passengerIdentifier) {
         this.routeId = routeId;
+        this.tripId = tripId;
+        this.boardingStopId = boardingStopId;
         this.destinationStopId = destinationStopId;
+        this.passengerIdentifier = passengerIdentifier;
     }
 }
 
@@ -248,6 +272,7 @@ class BoardingRequestModel {
     PassengerModel passenger;
     TripModel trip;
     Long routeId;
+    Long fastSignalId;
     StopModel boardingStop;
     StopModel destinationStop;
     Long passengerRecordId;
@@ -294,11 +319,17 @@ class RoutePathPointModel {
 
 class AiAssistantRequest {
     final Long tripId;
+    final Long routeId;
     final String question;
     final Map<String, Object> clientContext;
 
     AiAssistantRequest(Long tripId, String question, Map<String, Object> clientContext) {
+        this(tripId, null, question, clientContext);
+    }
+
+    AiAssistantRequest(Long tripId, Long routeId, String question, Map<String, Object> clientContext) {
         this.tripId = tripId;
+        this.routeId = routeId;
         this.question = question;
         this.clientContext = clientContext;
     }
@@ -306,10 +337,16 @@ class AiAssistantRequest {
 
 class AiSummaryRequest {
     final Long tripId;
+    final Long routeId;
     final Map<String, Object> clientContext;
 
     AiSummaryRequest(Long tripId, Map<String, Object> clientContext) {
+        this(tripId, null, clientContext);
+    }
+
+    AiSummaryRequest(Long tripId, Long routeId, Map<String, Object> clientContext) {
         this.tripId = tripId;
+        this.routeId = routeId;
         this.clientContext = clientContext;
     }
 }
