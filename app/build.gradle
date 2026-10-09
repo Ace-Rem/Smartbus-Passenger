@@ -20,6 +20,18 @@ def resolveApiBaseUrl = { String fallback ->
     return fallback
 }
 
+def resolveStadiaMapsApiKey = {
+    def fromLocal = localProperties.getProperty("STADIA_MAPS_API_KEY")
+    if (fromLocal != null && !fromLocal.trim().isEmpty()) {
+        return fromLocal.trim()
+    }
+    def fromProject = project.findProperty("STADIA_MAPS_API_KEY")
+    if (fromProject != null && !fromProject.toString().trim().isEmpty()) {
+        return fromProject.toString().trim()
+    }
+    return ""
+}
+
 android {
     namespace 'com.smartbus.passenger'
     compileSdk {
@@ -32,8 +44,8 @@ android {
         applicationId "com.smartbus.passenger"
         minSdk 28
         targetSdk 36
-        versionCode 3
-        versionName "1.3"
+        versionCode 5
+        versionName "1.5"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders = [
@@ -44,7 +56,9 @@ android {
     buildTypes {
         debug {
             def apiBaseUrl = resolveApiBaseUrl("https://smartbus-w5qy.onrender.com/api/")
+            def stadiaMapsApiKey = resolveStadiaMapsApiKey()
             buildConfigField "String", "BASE_URL", "\"${apiBaseUrl}\""
+            buildConfigField "String", "STADIA_MAPS_API_KEY", "\"${stadiaMapsApiKey}\""
             manifestPlaceholders.usesCleartextTraffic = apiBaseUrl.startsWith("http://") ? "true" : "false"
         }
         release {
@@ -52,7 +66,9 @@ android {
                 enable false
             }
             def apiBaseUrl = resolveApiBaseUrl("https://smartbus-w5qy.onrender.com/api/")
+            def stadiaMapsApiKey = resolveStadiaMapsApiKey()
             buildConfigField "String", "BASE_URL", "\"${apiBaseUrl}\""
+            buildConfigField "String", "STADIA_MAPS_API_KEY", "\"${stadiaMapsApiKey}\""
             manifestPlaceholders.usesCleartextTraffic = "false"
         }
     }
@@ -72,6 +88,7 @@ dependencies {
     implementation libs.retrofit.gson
     implementation libs.okhttp.logging
     implementation libs.osmdroid
+    implementation libs.location
     implementation libs.room.runtime
     annotationProcessor libs.room.compiler
     testImplementation libs.junit

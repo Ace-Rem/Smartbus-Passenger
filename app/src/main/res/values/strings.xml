@@ -34,6 +34,7 @@
     <string name="requests_title">Yêu cầu lên xe</string>
     <string name="map_title">Bản đồ tuyến</string>
     <string name="map_empty">Chọn tuyến để hiển thị bến và lộ trình trên bản đồ.</string>
+    <string name="map_osm_attribution">© Stadia Maps © OpenMapTiles © OpenStreetMap</string>
     <string name="recenter_map_action">Vị trí của tôi</string>
     <string name="find_route_action">Tìm tuyến xe</string>
     <string name="find_trips_action">Tìm chuyến phù hợp</string>

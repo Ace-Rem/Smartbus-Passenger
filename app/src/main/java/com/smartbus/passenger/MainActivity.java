@@ -1,6 +1,7 @@
 package com.smartbus.passenger;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
@@ -12,6 +13,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
+import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -29,6 +31,7 @@ import android.widget.ProgressBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -41,9 +44,16 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
 import com.smartbus.passenger.bluetooth.BluetoothConnectionState;
 import com.smartbus.passenger.bluetooth.BluetoothEvent;
 import com.smartbus.passenger.bluetooth.PassengerBluetoothManager;
+import com.smartbus.passenger.map.OfflineMapSupport;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
@@ -53,10 +63,9 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.osmdroid.config.Configuration;
-import org.osmdroid.tileprovider.tilesource.XYTileSource;
 import org.osmdroid.util.BoundingBox;
 import org.osmdroid.util.GeoPoint;
+import org.osmdroid.tileprovider.MapTileProviderBase;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polyline;
@@ -116,6 +125,36 @@ public class MainActivity extends AppCompatActivity {
     private PassengerBluetoothManager bluetoothManager;
     private PassengerModel currentPassenger;
     private Location currentLocation;
+    private FusedLocationProviderClient fusedLocationProviderClient;
+    private LocationCallback fusedLocationCallback;
+    private Marker passengerLocationMarker;
+    private boolean locationUpdatesStarted;
+    private boolean fusedLocationUpdatesStarted;
+    private boolean centerOnNextLocation;
+    private final Runnable locationTimeoutRunnable = () -> {
+        if (!centerOnNextLocation || currentLocation != null) {
+            return;
+        }
+        centerOnNextLocation = false;
+        if (!hasEnabledLocationProvider()) {
+            toast("Vị trí đang tắt. Hãy bật Location/GPS rồi thử lại.");
+        } else {
+            toast("Chưa nhận được tín hiệu vị trí. Hãy ra nơi thoáng hoặc thử lại.");
+        }
+    };
+    private final LocationListener passengerLocationListener = new LocationListener() {
+        @Override
+        public void onLocationChanged(Location location) {
+            applyLocationUpdate(location);
+        }
+
+        @Override
+        public void onProviderDisabled(String provider) {
+            if (LocationManager.GPS_PROVIDER.equals(provider) && currentTab == TAB_MAP) {
+                toast("GPS đang tắt. Hãy bật vị trí để định vị chính xác hơn.");
+            }
+        }
+    };
     private StopModel nearbyBoardingStop;
     private StopModel nearbySuggestedBoardingStop;
     private Double nearbySuggestedDistanceMeters;
@@ -202,21 +241,17 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(getApplicationContext());
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        Configuration.getInstance().setUserAgentValue(BuildConfig.APPLICATION_ID + "/" + BuildConfig.VERSION_NAME);
+        OfflineMapSupport.configure(
+                this,
+                BuildConfig.APPLICATION_ID + "/" + BuildConfig.VERSION_NAME,
+                getSharedPreferences("osmdroid", MODE_PRIVATE)
+        );
         setContentView(R.layout.activity_main);
         bindViews();
         applySystemInsets();
         setupActions();
-        Configuration.getInstance().load(
-                getApplicationContext(),
-                getSharedPreferences("osmdroid", MODE_PRIVATE)
-        );
-        Configuration.getInstance().setUserAgentValue(
-                BuildConfig.APPLICATION_ID + "/" + BuildConfig.VERSION_NAME
-        );
-        Configuration.getInstance().setTileDownloadThreads((short) 4);
-        Configuration.getInstance().setCacheMapTileCount((short) 200);
         setupMap();
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         selectedTripStore = new SelectedTripStore(preferences);
@@ -245,12 +280,15 @@ public class MainActivity extends AppCompatActivity {
         if (mapView != null) {
             mapView.onResume();
         }
+        startLocationUpdates();
         startTrackingRefresh();
     }
 
     @Override
     protected void onPause() {
         stopTrackingRefresh();
+        handler.removeCallbacks(locationTimeoutRunnable);
+        stopLocationUpdates();
         if (mapView != null) {
             mapView.onPause();
         }
@@ -261,6 +299,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         destroyed = true;
         stopTrackingRefresh();
+        stopLocationUpdates();
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
         }
@@ -551,24 +590,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupMap() {
-        XYTileSource tileSource = new XYTileSource(
-                "OpenStreetMap",
-                1,
-                19,
-                256,
-                ".png",
-                new String[]{
-                        "https://a.tile.openstreetmap.org/",
-                        "https://b.tile.openstreetmap.org/",
-                        "https://c.tile.openstreetmap.org/"
-                },
-                "© OpenStreetMap contributors"
-        );
-        mapView.setTileSource(tileSource);
+        MapTileProviderBase tileProvider = OfflineMapSupport.createTileProvider(
+                this, BuildConfig.STADIA_MAPS_API_KEY);
+        if (tileProvider != null) {
+            mapView.setTileProvider(tileProvider);
+        }
+        mapView.setTileSource(OfflineMapSupport.onlineTileSource(
+                this, BuildConfig.STADIA_MAPS_API_KEY));
         mapView.setMultiTouchControls(true);
         mapView.setTilesScaledToDpi(true);
         mapView.setMinZoomLevel(3.0);
-        mapView.setMaxZoomLevel(19.0);
+        mapView.setMaxZoomLevel(20.0);
         mapView.getOverlayManager().getTilesOverlay().setEnabled(true);
         mapView.getController().setZoom(13.0);
         mapView.getController().setCenter(new GeoPoint(10.7769, 106.7009));
@@ -2018,10 +2050,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void findNearbyTripsForCheckIn() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             ActivityCompat.requestPermissions(
                     this,
                     new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION},
@@ -2029,6 +2058,7 @@ public class MainActivity extends AppCompatActivity {
             );
             return;
         }
+        startLocationUpdates();
         currentLocation = lastKnownLocation();
         if (currentLocation == null) {
             toast("Chưa lấy được vị trí hiện tại. Hãy bật GPS rồi thử lại.");
@@ -2970,6 +3000,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         mapView.getOverlays().clear();
+        passengerLocationMarker = null;
         List<GeoPoint> points = new ArrayList<>();
         for (int index = 0; index < routeStops.size(); index++) {
             StopModel stop = routeStops.get(index);
@@ -3005,6 +3036,11 @@ public class MainActivity extends AppCompatActivity {
             mapView.getOverlays().add(marker);
         }
         pendingMapPoints = new ArrayList<>(points);
+        List<double[]> coverageCoordinates = new ArrayList<>();
+        for (GeoPoint point : points) {
+            coverageCoordinates.add(new double[]{point.getLatitude(), point.getLongitude()});
+        }
+        OfflineMapSupport.logCoverage("passenger", coverageCoordinates);
         addSelectedRoutePathOverlay();
         addBusMarkerIfAvailable();
         addPassengerLocationMarker();
@@ -3057,10 +3093,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void centerMapOnRoute() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             ActivityCompat.requestPermissions(
                     this,
                     new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION},
@@ -3068,8 +3101,11 @@ public class MainActivity extends AppCompatActivity {
             );
             return;
         }
+        startLocationUpdates();
         currentLocation = lastKnownLocation();
         if (currentLocation != null) {
+            centerOnNextLocation = false;
+            handler.removeCallbacks(locationTimeoutRunnable);
             renderMap(stops, null, null, false);
             GeoPoint mine = new GeoPoint(currentLocation.getLatitude(), currentLocation.getLongitude());
             mapView.getController().setCenter(mine);
@@ -3077,14 +3113,168 @@ public class MainActivity extends AppCompatActivity {
             toast("Đã đưa bản đồ về vị trí của bạn.");
             return;
         }
+        centerOnNextLocation = true;
+        handler.removeCallbacks(locationTimeoutRunnable);
+        handler.postDelayed(locationTimeoutRunnable, 15_000L);
         if (stops.isEmpty()) {
-            mapView.getController().setCenter(new GeoPoint(10.7769, 106.7009));
-            mapView.getController().setZoom(13.0);
-            toast("Chưa có vị trí hiện tại, tạm đưa bản đồ về trung tâm mặc định.");
+            toast("Đang chờ tín hiệu vị trí hiện tại...");
             return;
         }
         renderMap(stops, null, null, true);
-        toast("Chưa có vị trí hiện tại, tạm đưa bản đồ về tuyến đang chọn.");
+        toast("Đang chờ tín hiệu vị trí hiện tại...");
+    }
+
+    private boolean hasLocationPermission() {
+        return ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED
+                || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startLocationUpdates() {
+        if (!hasLocationPermission()
+                || locationUpdatesStarted
+                || fusedLocationUpdatesStarted) {
+            return;
+        }
+        startFusedLocationUpdates();
+        startPlatformLocationUpdates();
+        Location cached = lastKnownLocation();
+        if (cached != null) {
+            applyLocationUpdate(cached);
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startFusedLocationUpdates() {
+        if (fusedLocationProviderClient == null) {
+            return;
+        }
+        LocationRequest request = new LocationRequest.Builder(
+                Priority.PRIORITY_HIGH_ACCURACY, 2_000L)
+                .setMinUpdateIntervalMillis(1_000L)
+                .setMaxUpdateDelayMillis(2_000L)
+                .build();
+        fusedLocationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(@NonNull LocationResult result) {
+                Location location = result.getLastLocation();
+                if (location != null) {
+                    applyLocationUpdate(location);
+                }
+            }
+        };
+        fusedLocationUpdatesStarted = true;
+        fusedLocationProviderClient.getLastLocation()
+                .addOnSuccessListener(location -> {
+                    if (location != null) {
+                        applyLocationUpdate(location);
+                    }
+                });
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            fusedLocationProviderClient.getCurrentLocation(
+                            Priority.PRIORITY_HIGH_ACCURACY, null)
+                    .addOnSuccessListener(location -> {
+                        if (location != null) {
+                            applyLocationUpdate(location);
+                        }
+                    });
+        }
+        fusedLocationProviderClient.requestLocationUpdates(
+                request, fusedLocationCallback, Looper.getMainLooper());
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startPlatformLocationUpdates() {
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (locationManager == null) {
+            return;
+        }
+        try {
+            boolean requested = false;
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        2_000L,
+                        5f,
+                        passengerLocationListener,
+                        Looper.getMainLooper()
+                );
+                requested = true;
+            }
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        5_000L,
+                        10f,
+                        passengerLocationListener,
+                        Looper.getMainLooper()
+                );
+                requested = true;
+            }
+            locationUpdatesStarted = requested;
+        } catch (SecurityException ignored) {
+            locationUpdatesStarted = false;
+        }
+    }
+
+    private void stopLocationUpdates() {
+        if (!locationUpdatesStarted && !fusedLocationUpdatesStarted) {
+            return;
+        }
+        if (fusedLocationProviderClient != null && fusedLocationCallback != null) {
+            fusedLocationProviderClient.removeLocationUpdates(fusedLocationCallback);
+            fusedLocationCallback = null;
+        }
+        fusedLocationUpdatesStarted = false;
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (locationManager != null) {
+            try {
+                locationManager.removeUpdates(passengerLocationListener);
+            } catch (SecurityException ignored) {
+                // Permission may have been revoked while the activity was paused.
+            }
+        }
+        locationUpdatesStarted = false;
+    }
+
+    private boolean hasEnabledLocationProvider() {
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (locationManager == null) {
+            return false;
+        }
+        try {
+            return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                    || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void applyLocationUpdate(Location location) {
+        if (location == null
+                || !Double.isFinite(location.getLatitude())
+                || !Double.isFinite(location.getLongitude())
+                || location.getLatitude() < -90d
+                || location.getLatitude() > 90d
+                || location.getLongitude() < -180d
+                || location.getLongitude() > 180d) {
+            return;
+        }
+        currentLocation = location;
+        if (mapView == null) {
+            return;
+        }
+        updatePassengerLocationMarker();
+        if (centerOnNextLocation && currentTab == TAB_MAP) {
+            centerOnNextLocation = false;
+            handler.removeCallbacks(locationTimeoutRunnable);
+            mapView.getController().setCenter(new GeoPoint(location.getLatitude(), location.getLongitude()));
+            mapView.getController().setZoom(16.0);
+            toast("Đã đưa bản đồ về vị trí của bạn.");
+        }
+        mapView.invalidate();
     }
 
     private Location lastKnownLocation() {
@@ -3269,13 +3459,25 @@ public class MainActivity extends AppCompatActivity {
         if (currentLocation == null) {
             return;
         }
-        Marker mine = new Marker(mapView);
-        mine.setPosition(new GeoPoint(currentLocation.getLatitude(), currentLocation.getLongitude()));
-        mine.setTitle("Vị trí của tôi");
-        mine.setSnippet("Vị trí gần nhất trên thiết bị");
-        mine.setIcon(createPinDrawable(getColor(R.color.smartbus_success), "Tôi"));
-        mine.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-        mapView.getOverlays().add(mine);
+        passengerLocationMarker = new Marker(mapView);
+        passengerLocationMarker.setTitle("Vị trí của tôi");
+        passengerLocationMarker.setSnippet("Vị trí gần nhất trên thiết bị");
+        passengerLocationMarker.setIcon(createPinDrawable(getColor(R.color.smartbus_success), "Tôi"));
+        passengerLocationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+        mapView.getOverlays().add(passengerLocationMarker);
+        updatePassengerLocationMarker();
+    }
+
+    private void updatePassengerLocationMarker() {
+        if (mapView == null || currentLocation == null) {
+            return;
+        }
+        if (passengerLocationMarker == null) {
+            addPassengerLocationMarker();
+            return;
+        }
+        passengerLocationMarker.setPosition(new GeoPoint(
+                currentLocation.getLatitude(), currentLocation.getLongitude()));
     }
 
     private Drawable markerIconFor(StopModel stop, int index, int total, Long currentStopId, Long nextStopId) {
@@ -3855,7 +4057,7 @@ public class MainActivity extends AppCompatActivity {
             }
             updateBluetoothStatus();
         } else if (requestCode == REQUEST_LOCATION) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            if (hasLocationPermission()) {
                 if (currentTab == TAB_MAP) {
                     centerMapOnRoute();
                 } else {
