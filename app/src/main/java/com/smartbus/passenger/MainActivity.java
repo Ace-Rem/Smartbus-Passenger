@@ -53,6 +53,7 @@ import com.google.android.gms.location.Priority;
 import com.smartbus.passenger.bluetooth.BluetoothConnectionState;
 import com.smartbus.passenger.bluetooth.BluetoothEvent;
 import com.smartbus.passenger.bluetooth.PassengerBluetoothManager;
+import com.smartbus.passenger.lan.LocalLanCheckInClient;
 import com.smartbus.passenger.map.OfflineMapSupport;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
@@ -86,7 +87,8 @@ public class MainActivity extends AppCompatActivity {
     private static final int MAX_LOCAL_CHECKINS = 5;
     private static final long TRACKING_REFRESH_MS = 12_000L;
     private static final long ACCEPTANCE_POLL_MS = 2_000L;
-    private static final int MAX_FAST_SIGNAL_RETRIES = 3;
+    private static final int MAX_FAST_SIGNAL_RETRIES = 5;
+    private static final long FAST_SIGNAL_RETRY_DELAY_MS = 300L;
     private static final double AUTO_BOARDING_STOP_RADIUS_METERS = 50d;
     private static final int REQUEST_BLUETOOTH_CONNECT = 4101;
     private static final int REQUEST_LOCATION = 4102;
@@ -123,8 +125,10 @@ public class MainActivity extends AppCompatActivity {
     private final ExecutorService dataExecutor = Executors.newSingleThreadExecutor();
     private SharedPreferences preferences;
     private PassengerBluetoothManager bluetoothManager;
+    private LocalLanCheckInClient lanCheckInClient;
     private PassengerModel currentPassenger;
     private Location currentLocation;
+    private final List<AiConversationMessage> aiConversationHistory = new ArrayList<>();
     private FusedLocationProviderClient fusedLocationProviderClient;
     private LocationCallback fusedLocationCallback;
     private Marker passengerLocationMarker;
@@ -268,6 +272,7 @@ public class MainActivity extends AppCompatActivity {
         );
         aiContextSyncManager = new PassengerAiContextSyncManager();
         bluetoothManager = new PassengerBluetoothManager(this);
+        lanCheckInClient = new LocalLanCheckInClient(this);
         setAuthMode(false);
         addAiAssistantMessage("Tôi có thể trả lời dựa trên chuyến bạn đã đăng ký: vị trí xe, bến tiếp theo, bến xuống và tóm tắt hành trình.");
         updateBluetoothStatus();
@@ -302,6 +307,9 @@ public class MainActivity extends AppCompatActivity {
         stopLocationUpdates();
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
+        }
+        if (lanCheckInClient != null) {
+            lanCheckInClient.stop();
         }
         if (mapView != null) {
             mapView.onDetach();
@@ -726,6 +734,10 @@ public class MainActivity extends AppCompatActivity {
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
         }
+        if (lanCheckInClient != null) {
+            lanCheckInClient.stop();
+            lanCheckInClient = new LocalLanCheckInClient(this);
+        }
         RetrofitClient.clearToken();
         preferences.edit().clear().apply();
         currentPassenger = null;
@@ -768,6 +780,10 @@ public class MainActivity extends AppCompatActivity {
         if (aiContextSyncManager != null) aiContextSyncManager.clearPending();
         if (bluetoothManager != null) {
             bluetoothManager.stopAdvertising();
+        }
+        if (lanCheckInClient != null) {
+            lanCheckInClient.stop();
+            lanCheckInClient = new LocalLanCheckInClient(this);
         }
         RetrofitClient.clearToken();
         preferences.edit().clear().apply();
@@ -1159,7 +1175,7 @@ public class MainActivity extends AppCompatActivity {
                     + "\nBến lên: " + name(request.boardingStop)
                     + "\nBến xuống: " + name(request.destinationStop)
                     + "\nBluetooth: " + safe(request.bluetoothIdentifier)
-                    + "\nPhát BLE: " + (bluetoothManager.isAdvertising() ? "đang phát" : "chưa phát/đã dừng"));
+                    + "\nBLE: " + (bluetoothManager.isSending() ? "đang gửi" : "chưa gửi/đã dừng"));
             MaterialButton replay = new MaterialButton(this);
             replay.setText("Phát lại BLE");
             replay.setTextColor(getColor(R.color.white));
@@ -1933,6 +1949,23 @@ public class MainActivity extends AppCompatActivity {
         return request != null && "LOCAL_BLE_CHECKIN".equals(request.note);
     }
 
+    private boolean sameCheckInSelection(
+            BoardingRequestModel request,
+            Long routeId,
+            StopModel boarding,
+            StopModel destination
+    ) {
+        Long requestBoardingId = request.boardingStop == null ? null : request.boardingStop.id;
+        Long requestDestinationId = request.destinationStop == null ? null : request.destinationStop.id;
+        Long boardingId = boarding == null ? null : boarding.id;
+        Long destinationId = destination == null ? null : destination.id;
+        Long requestRouteId = request.routeId != null ? request.routeId
+                : request.trip == null ? null : request.trip.routeId;
+        return java.util.Objects.equals(requestRouteId, routeId)
+                && java.util.Objects.equals(requestBoardingId, boardingId)
+                && java.util.Objects.equals(requestDestinationId, destinationId);
+    }
+
     private void trackLocalCheckIn(BoardingRequestModel request, boolean userInitiated) {
         selectedRequest = request;
         syncSelectedRequest(request);
@@ -2004,7 +2037,7 @@ public class MainActivity extends AppCompatActivity {
                         + "\nBến đi: " + (boarding == null ? getString(R.string.boarding_stop_not_selected) : name(boarding))
                         + "\nBến xuống: " + name(destination)
                         + "\n" + (confirmed
-                        ? "Bấm Tìm chuyến gần tôi để phát BLE check-in."
+                        ? "Bấm Tìm chuyến gần tôi để tìm Driver và gửi check-in BLE."
                         : "Chọn bến đi/xuống rồi bấm Xác nhận bến đi/xuống."));
                 checkInButton.setText(R.string.bluetooth_checkin_action);
                 checkInButton.setEnabled(true);
@@ -2019,7 +2052,7 @@ public class MainActivity extends AppCompatActivity {
                     bluetoothStatusText.setText("Đã chọn tuyến: " + routeLabel(route)
                             + (confirmed ? "\nĐã xác nhận bến đi/xuống." : "\nChưa xác nhận bến đi/xuống.")
                             + "\n" + (confirmed
-                            ? "Bấm Tìm chuyến gần tôi để phát BLE."
+                            ? "Bấm Tìm chuyến gần tôi để tìm Driver."
                             : "Chọn bến đi/xuống rồi bấm Xác nhận bến đi/xuống."));
             } else {
                 bluetoothStatusText.setText(route != null && route.id != null
@@ -2043,7 +2076,8 @@ public class MainActivity extends AppCompatActivity {
                 : request.bluetoothIdentifier;
         bluetoothStatusText.setText("Mã check-in: " + identifier
                 + "\nTuyến #" + safeLong(currentSelectedRouteId())
-                + "\n" + (bluetoothManager.isAdvertising() ? "Đang phát BLE." : bluetoothStateMessage(state)));
+                        + "\n" + (bluetoothManager.isSending() ? "Đang tìm Driver để gửi BLE."
+                        : bluetoothStateMessage(state)));
         boolean canCheckIn = "PENDING".equals(request.status) || "CONFIRMED".equals(request.status);
         checkInButton.setText("Chuẩn bị check-in");
         checkInButton.setEnabled(true);
@@ -2134,7 +2168,7 @@ public class MainActivity extends AppCompatActivity {
                 + "\nTuyến: " + routeLabel(selectedRoute)
                 + "\nKhoảng cách: " + distanceLabel(data.distanceMeters)
                 + (confirmed
-                ? "\nĐã xác nhận bến đi/xuống, sẵn sàng phát BLE."
+                ? "\nĐã xác nhận bến đi/xuống, sẵn sàng tìm Driver và gửi BLE."
                 : "\nChọn tuyến và bến đi/bến xuống rồi xác nhận."));
         if (data.trips == null || data.trips.isEmpty()) {
             addText(nearbyTripsContainer, "Chưa có chuyến offline cho tuyến này. Vào tab Tuyến xe để chọn tuyến/bến rồi tìm chuyến.");
@@ -2468,7 +2502,7 @@ public class MainActivity extends AppCompatActivity {
         bluetoothStatusText.setText("Đã xác nhận tuyến #" + safeLong(route.id)
                 + "\nBến đi: " + name(currentBoardingStop())
                 + "\nBến xuống: " + name(currentDestinationStop())
-                + "\nBấm Tìm chuyến gần tôi để phát BLE check-in.");
+                + "\nBấm Tìm chuyến gần tôi để tìm Driver và gửi check-in BLE.");
         toast("Đã xác nhận tuyến và bến đi/xuống trên máy.");
         updateBluetoothStatus();
         renderSelectedTripSummary();
@@ -2547,12 +2581,19 @@ public class MainActivity extends AppCompatActivity {
         }
         if ((request == null || request.id == null)
                 && (selectionState == null || !selectionState.isLocalSelectionConfirmed())) {
-            toast("Hãy xác nhận bến đi/xuống trước khi phát BLE.");
+            toast("Hãy xác nhận bến đi/xuống trước khi gửi check-in BLE.");
             return;
         }
+        StopModel boarding = currentBoardingStop();
         String status = request != null && request.status != null
                 ? request.status
                 : (selectionState == null ? null : selectionState.checkInStatus());
+        if (request != null && isLocalCheckIn(request)
+                && !"COMPLETED".equals(status)
+                && sameCheckInSelection(request, routeId, boarding, destination)) {
+            toast("Đã gửi check-in bằng BLE bluetooth");
+            return;
+        }
         if ("BOARDED".equals(status) || "COMPLETED".equals(status)) {
             if (!resetFinishedLocalRequestForNewSelection(request)) {
                 toast("Yêu cầu này đã được xác nhận lên xe, hãy đổi bến xuống để tạo yêu cầu mới.");
@@ -2561,18 +2602,9 @@ public class MainActivity extends AppCompatActivity {
             request = currentBoardingRequest();
         }
         BluetoothConnectionState state = bluetoothManager.getState();
-        if (state == BluetoothConnectionState.PERMISSION_REQUIRED) {
-            requestBluetoothPermission();
-            return;
-        }
-        if (state == BluetoothConnectionState.DISABLED) {
-            toast("Bluetooth đang tắt. Vui lòng bật Bluetooth để trình diễn check-in.");
-            return;
-        }
-        if (state == BluetoothConnectionState.UNSUPPORTED) {
-            toast("Thiết bị này không hỗ trợ Bluetooth.");
-            return;
-        }
+        boolean bleReady = state != BluetoothConnectionState.PERMISSION_REQUIRED
+                && state != BluetoothConnectionState.DISABLED
+                && state != BluetoothConnectionState.UNSUPPORTED;
         String identifier = request != null && request.bluetoothIdentifier != null
                 ? request.bluetoothIdentifier
                 : ensureLocalBluetoothIdentifier(routeId);
@@ -2583,10 +2615,23 @@ public class MainActivity extends AppCompatActivity {
             localRequest.id = requestId;
             localRequest.passenger = currentPassenger;
             localRequest.routeId = routeId;
-            localRequest.boardingStop = copyStop(currentBoardingStop());
+            localRequest.boardingStop = copyStop(boarding);
             localRequest.destinationStop = copyStop(destination);
             localRequest.status = "PENDING";
             localRequest.note = "LOCAL_BLE_CHECKIN";
+            localRequest.bluetoothIdentifier = identifier;
+            syncSelectedRequest(localRequest);
+            addLocalCheckIn(localRequest);
+        } else {
+            // Keep the same local request/identity when only the selected
+            // boarding or alighting stop changes. Driver can then update the
+            // existing passenger row instead of counting a second passenger.
+            cancelFastBoardingSignalSilently(localRequest);
+            localRequest.routeId = routeId;
+            localRequest.boardingStop = copyStop(boarding);
+            localRequest.destinationStop = copyStop(destination);
+            localRequest.status = "PENDING";
+            localRequest.fastSignalId = null;
             localRequest.bluetoothIdentifier = identifier;
             syncSelectedRequest(localRequest);
             addLocalCheckIn(localRequest);
@@ -2600,20 +2645,71 @@ public class MainActivity extends AppCompatActivity {
                 destination.longitude == null ? null : destination.longitude.doubleValue(),
                 identifier
         );
-        boolean advertising = bluetoothManager.startAdvertising(event);
-        publishFastBoardingSignal(
-                routeId,
-                currentSelectedTripId(),
-                currentBoardingStop() == null ? null : currentBoardingStop().id,
-                destination.id,
-                identifier,
-                localRequest.id
-        );
+        if (bluetoothStatusText != null) {
+            bluetoothStatusText.setText("Đã xác nhận dữ liệu check-in."
+                    + "\nPayload chuẩn bị gửi: " + event.toPayloadText()
+                    + "\nĐang gửi server + LAN song song với BLE...");
+        }
+        final Long fallbackTripId = currentSelectedTripId();
+        final Long fallbackBoardingStopId = currentBoardingStop() == null
+                ? null : currentBoardingStop().id;
+        final Long fallbackRequestId = localRequest.id;
+        final boolean[] fastSignalPublished = {false};
+        Runnable publishFastSignal = () -> {
+            if (fastSignalPublished[0]) {
+                return;
+            }
+            fastSignalPublished[0] = true;
+            publishFastBoardingSignal(routeId, fallbackTripId, fallbackBoardingStopId,
+                    destination.id, identifier, fallbackRequestId);
+        };
+        // Publish immediately while BLE scans/connects. Waiting for all BLE
+        // retries made the server path arrive more than 20 seconds late.
+        publishFastSignal.run();
+        if (lanCheckInClient != null) {
+            lanCheckInClient.startCheckIn(
+                    routeId,
+                    fallbackBoardingStopId,
+                    destination.id,
+                    String.valueOf(requestId),
+                    identifier,
+                    new LocalLanCheckInClient.Listener() {
+                        @Override
+                        public void onMessage(String message) {
+                            runOnUiThread(() -> {
+                                if (!destroyed && message != null) {
+                                    toast(message);
+                                }
+                            });
+                        }
+
+                        @Override
+                        public void onAccepted(String acceptedRequestId, String status,
+                                               long acceptedTripId, long acceptedRouteId,
+                                               Long boardingStopId, Long destinationStopId) {
+                            runOnUiThread(() -> applyLanAcceptance(
+                                    acceptedRequestId, status, acceptedTripId, acceptedRouteId,
+                                    boardingStopId, destinationStopId));
+                        }
+                    });
+        }
+        if (state == BluetoothConnectionState.PERMISSION_REQUIRED) {
+            requestBluetoothPermission();
+        }
+        boolean sending = bleReady && bluetoothManager.startCheckIn(event, message -> runOnUiThread(() -> {
+            updateBluetoothStatus();
+            if (message != null && bluetoothStatusText != null) {
+                bluetoothStatusText.setText(message);
+            }
+            if (message != null && (message.contains("thành công") || message.contains("Không")
+                    || message.contains("thất bại") || message.contains("lỗi"))) {
+                toast(message);
+            }
+        }));
         showLocalDropoffDistance(destination);
         updateBluetoothStatus();
         renderLocalCheckIns();
-        toast((advertising ? "Đang phát BLE check-in" : "Chưa phát được BLE, hãy kiểm tra quyền/Bluetooth")
-                + ": tuyến #" + safeLong(routeId));
+        toast("Đã gửi check-in bằng BLE bluetooth");
     }
 
     private void publishFastBoardingSignal(Long routeId, Long tripId, Long boardingStopId,
@@ -2673,8 +2769,14 @@ public class MainActivity extends AppCompatActivity {
         // Retry only transient failures. 4xx means the payload/session is
         // invalid and repeating it cannot make the request visible to a driver.
         boolean transientFailure = responseCode == 0 || responseCode >= 500;
-        if (!transientFailure || attempt >= MAX_FAST_SIGNAL_RETRIES || destroyed) return;
-        long delay = 1_000L * (attempt + 1);
+        if (!transientFailure || attempt >= MAX_FAST_SIGNAL_RETRIES || destroyed) {
+            if (!destroyed) {
+                String detail = responseCode > 0 ? " (HTTP " + responseCode + ")" : "";
+                runOnUiThread(() -> toast("Không gửi được yêu cầu check-in lên server" + detail + "."));
+            }
+            return;
+        }
+        long delay = FAST_SIGNAL_RETRY_DELAY_MS * (attempt + 1);
         handler.postDelayed(() -> publishFastBoardingSignal(
                 routeId, tripId, boardingStopId, destinationStopId, passengerIdentifier,
                 localRequestId, attempt + 1), delay);
@@ -2697,6 +2799,7 @@ public class MainActivity extends AppCompatActivity {
             if (request != null && localRequestId != null && localRequestId.equals(request.id)) {
                 request.fastSignalId = signal.id;
                 persistLocalCheckIns();
+                runOnUiThread(() -> toast("Đã gửi yêu cầu check-in lên server."));
                 return;
             }
         }
@@ -2790,7 +2893,16 @@ public class MainActivity extends AppCompatActivity {
         selectionState.setBoardingStop(boarding);
         selectionState.setDestinationStop(destination);
 
-        BoardingRequestModel acceptedRequest = findLocalCheckIn(event);
+        BoardingRequestModel acceptedRequest = event.localRequestId == null
+                ? null : findLocalCheckInById(event.localRequestId);
+        if (acceptedRequest == null) {
+            acceptedRequest = findLocalCheckIn(event);
+        }
+        if (acceptedRequest != null && "BOARDED".equals(acceptedRequest.status)) {
+            // LAN and server can acknowledge the same check-in concurrently.
+            // Keep one passenger state transition and one notification.
+            return;
+        }
         if (acceptedRequest == null) {
             acceptedRequest = new BoardingRequestModel();
             acceptedRequest.id = event.signalId == null ? System.currentTimeMillis() : event.signalId;
@@ -2813,6 +2925,37 @@ public class MainActivity extends AppCompatActivity {
                 + ". Đang trên tuyến " + routeLabel(selectedRoute) + ".");
     }
 
+    private void applyLanAcceptance(
+            String requestId,
+            String status,
+            long tripId,
+            long routeId,
+            Long boardingStopId,
+            Long destinationStopId
+    ) {
+        if (destroyed || requestId == null || !"BOARDED".equals(status)) {
+            return;
+        }
+        Long localRequestId;
+        try {
+            localRequestId = Long.parseLong(requestId);
+        } catch (NumberFormatException ignored) {
+            return;
+        }
+        if (findLocalCheckInById(localRequestId) == null) {
+            return;
+        }
+        FastBoardingAcceptanceModel event = new FastBoardingAcceptanceModel();
+        event.id = System.currentTimeMillis();
+        event.localRequestId = localRequestId;
+        event.tripId = tripId;
+        event.routeId = routeId;
+        event.boardingStopId = boardingStopId;
+        event.destinationStopId = destinationStopId;
+        event.status = status;
+        applyDriverAcceptance(event);
+    }
+
     private void addStatusMessage(String message) {
         if (bluetoothStatusText != null && message != null) {
             bluetoothStatusText.setText(message);
@@ -2828,6 +2971,16 @@ public class MainActivity extends AppCompatActivity {
             if (event.routeId.equals(routeId)
                     && (event.destinationStopId == null || request.destinationStop == null
                     || event.destinationStopId.equals(request.destinationStop.id))) {
+                return request;
+            }
+        }
+        return null;
+    }
+
+    private BoardingRequestModel findLocalCheckInById(Long localRequestId) {
+        if (localRequestId == null) return null;
+        for (BoardingRequestModel request : localCheckIns) {
+            if (request != null && localRequestId.equals(request.id)) {
                 return request;
             }
         }
@@ -2934,7 +3087,11 @@ public class MainActivity extends AppCompatActivity {
             return existing;
         }
         long passengerId = currentPassenger == null || currentPassenger.id == null ? 0L : currentPassenger.id;
-        String identifier = "P" + passengerId + "R" + safeLong(routeId) + "D" + (System.currentTimeMillis() % 100000);
+        // Keep the identity stable across stop/route edits. Route and stop
+        // belong to the check-in data, not to the passenger identity key.
+        String identifier = passengerId > 0L
+                ? "P" + passengerId
+                : "P-LOCAL-" + java.util.UUID.randomUUID();
         if (selectionState != null) {
             selectionState.markLocalCheckIn(identifier);
             persistSelectionState();
@@ -2946,7 +3103,7 @@ public class MainActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             ActivityCompat.requestPermissions(
                     this,
-                    new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE},
+                    new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT},
                     REQUEST_BLUETOOTH_CONNECT
             );
         }
@@ -3623,49 +3780,61 @@ public class MainActivity extends AppCompatActivity {
         }
         String trimmed = question.trim();
         addAiUserMessage(trimmed);
+        aiConversationHistory.add(new AiConversationMessage("user", trimmed));
         aiQuestionInput.setText("");
         setAiLoading(true);
         aiContextProvider.load(selectionState, context -> runOnUiThread(() -> {
             if (destroyed) return;
+            final Map<String, Object> enrichedContext = enrichAiContextWithDeviceState(context);
             if (aiContextSyncManager != null) {
-                aiContextSyncManager.submit(context);
+                aiContextSyncManager.submit(enrichedContext);
             }
-            Long tripId = numberValue(context.get("selectedTripId"));
-            Long routeId = numberValue(context.get("selectedRouteId"));
+            Long tripId = numberValue(enrichedContext.get("selectedTripId"));
+            if (enrichedContext.get("boardingRequestId") == null) tripId = null;
+            Long routeId = numberValue(enrichedContext.get("selectedRouteId"));
             if (tripId == null && routeId == null) {
                 setAiLoading(false);
                 addAiAssistantMessage("Chưa có tuyến hoặc chuyến được chọn để đối chiếu backend.");
                 return;
             }
-            call(RetrofitClient.api().aiChat(new AiAssistantRequest(tripId, routeId, trimmed, context)), data -> {
+            call(RetrofitClient.api().aiChat(new AiAssistantRequest(tripId, routeId, trimmed, enrichedContext,
+                    new ArrayList<>(aiConversationHistory))), data -> {
                 setAiLoading(false);
-                addAiAssistantMessage(data.answer == null || data.answer.isBlank()
+                String answer = data.answer == null || data.answer.isBlank()
                         ? "Backend chưa trả về câu trả lời AI."
-                        : data.answer);
+                        : data.answer;
+                aiConversationHistory.add(new AiConversationMessage("assistant", answer));
+                addAiAssistantMessage(answer);
             }, () -> setAiLoading(false));
         }));
     }
 
     private void requestAiSummary() {
         addAiUserMessage("Tóm tắt hành trình của tôi");
+        aiConversationHistory.add(new AiConversationMessage("user", "Tóm tắt hành trình của tôi"));
         setAiLoading(true);
         aiContextProvider.load(selectionState, context -> runOnUiThread(() -> {
             if (destroyed) return;
+            final Map<String, Object> enrichedContext = enrichAiContextWithDeviceState(context);
             if (aiContextSyncManager != null) {
-                aiContextSyncManager.submit(context);
+                aiContextSyncManager.submit(enrichedContext);
             }
-            Long tripId = numberValue(context.get("selectedTripId"));
-            Long routeId = numberValue(context.get("selectedRouteId"));
+            Long tripId = numberValue(enrichedContext.get("selectedTripId"));
+            if (enrichedContext.get("boardingRequestId") == null) tripId = null;
+            Long routeId = numberValue(enrichedContext.get("selectedRouteId"));
             if (tripId == null && routeId == null) {
                 setAiLoading(false);
                 addAiAssistantMessage("Chưa có tuyến hoặc chuyến được chọn để đối chiếu backend.");
                 return;
             }
-            call(RetrofitClient.api().aiSummary(new AiSummaryRequest(tripId, routeId, context)), data -> {
+            call(RetrofitClient.api().aiSummary(new AiSummaryRequest(tripId, routeId, enrichedContext,
+                    new ArrayList<>(aiConversationHistory))), data -> {
                 setAiLoading(false);
-                addAiAssistantMessage(data.answer == null || data.answer.isBlank()
+                String answer = data.answer == null || data.answer.isBlank()
                         ? "Backend chưa trả về tóm tắt."
-                        : data.answer);
+                        : data.answer;
+                aiConversationHistory.add(new AiConversationMessage("assistant", answer));
+                addAiAssistantMessage(answer);
             }, () -> setAiLoading(false));
         }));
     }
@@ -3675,6 +3844,26 @@ public class MainActivity extends AppCompatActivity {
         aiContextProvider.load(selectionState, context -> {
             if (!destroyed) aiContextSyncManager.submit(context);
         });
+    }
+
+    private Map<String, Object> enrichAiContextWithDeviceState(Map<String, Object> source) {
+        Map<String, Object> context = source == null
+                ? new java.util.LinkedHashMap<>() : new java.util.LinkedHashMap<>(source);
+        context.put("locationPermissionGranted", hasLocationPermission());
+        context.put("locationProviderEnabled", hasEnabledLocationProvider());
+        if (currentPassenger != null && currentPassenger.id != null) {
+            context.put("passengerId", currentPassenger.id);
+        }
+        if (currentLocation != null) {
+            context.put("passengerLatitude", currentLocation.getLatitude());
+            context.put("passengerLongitude", currentLocation.getLongitude());
+            context.put("passengerLocationUpdatedAt", currentLocation.getTime());
+            if (currentLocation.hasAccuracy()) context.put("passengerLocationAccuracyMeters", currentLocation.getAccuracy());
+            context.put("passengerLocationSource", currentLocation.getProvider());
+        }
+        context.put("aiContextUpdatedAt", System.currentTimeMillis());
+        context.put("syncState", "LOCAL_SNAPSHOT");
+        return context;
     }
 
     private String answerFromLocalContext(String question, Map<String, Object> context) {
@@ -4026,7 +4215,10 @@ public class MainActivity extends AppCompatActivity {
                     finished.run();
                 }
                 if (showErrors) {
-                    toast(networkErrorMessage(throwable));
+                    String path = call.request().url().encodedPath();
+                    toast(path.contains("/ai/")
+                            ? "Không thể gọi AI API khi offline hoặc backend chưa khả dụng. Dữ liệu local vẫn được giữ nguyên."
+                            : networkErrorMessage(throwable));
                 }
             }
         });

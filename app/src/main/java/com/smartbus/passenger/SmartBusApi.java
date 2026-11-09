@@ -322,16 +322,23 @@ class AiAssistantRequest {
     final Long routeId;
     final String question;
     final Map<String, Object> clientContext;
+    final List<AiConversationMessage> conversationHistory;
 
     AiAssistantRequest(Long tripId, String question, Map<String, Object> clientContext) {
         this(tripId, null, question, clientContext);
     }
 
     AiAssistantRequest(Long tripId, Long routeId, String question, Map<String, Object> clientContext) {
+        this(tripId, routeId, question, clientContext, null);
+    }
+
+    AiAssistantRequest(Long tripId, Long routeId, String question, Map<String, Object> clientContext,
+                       List<AiConversationMessage> conversationHistory) {
         this.tripId = tripId;
         this.routeId = routeId;
         this.question = question;
         this.clientContext = clientContext;
+        this.conversationHistory = conversationHistory;
     }
 }
 
@@ -339,18 +346,35 @@ class AiSummaryRequest {
     final Long tripId;
     final Long routeId;
     final Map<String, Object> clientContext;
+    final List<AiConversationMessage> conversationHistory;
 
     AiSummaryRequest(Long tripId, Map<String, Object> clientContext) {
         this(tripId, null, clientContext);
     }
 
     AiSummaryRequest(Long tripId, Long routeId, Map<String, Object> clientContext) {
+        this(tripId, routeId, clientContext, null);
+    }
+
+    AiSummaryRequest(Long tripId, Long routeId, Map<String, Object> clientContext,
+                     List<AiConversationMessage> conversationHistory) {
         this.tripId = tripId;
         this.routeId = routeId;
         this.clientContext = clientContext;
+        this.conversationHistory = conversationHistory;
     }
 }
 
 class AiAssistantResponse {
     String answer;
+}
+
+class AiConversationMessage {
+    final String role;
+    final String content;
+
+    AiConversationMessage(String role, String content) {
+        this.role = role;
+        this.content = content;
+    }
 }

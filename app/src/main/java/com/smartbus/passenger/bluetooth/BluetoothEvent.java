@@ -60,15 +60,15 @@ public class BluetoothEvent {
         return "CHECKIN-" + (routeId == null ? tripId : routeId) + "-" + bluetoothIdentifier;
     }
 
-    public byte[] toManufacturerPayload() {
+    public byte[] toPayload() {
         return SmartBusBleCodec.encode(
                 routeId == null ? 0L : routeId,
-                destinationStopId == null ? 0L : destinationStopId,
-                bluetoothIdentifier
+                destinationStopId == null ? 0L : destinationStopId
         );
     }
 
-    public byte[] toIdentifierPayload() {
-        return SmartBusBleCodec.encodeIdentifier(bluetoothIdentifier);
+    /** Human-readable value used by the passenger diagnostic status. */
+    public String toPayloadText() {
+        return new String(toPayload(), java.nio.charset.StandardCharsets.UTF_8);
     }
 }
